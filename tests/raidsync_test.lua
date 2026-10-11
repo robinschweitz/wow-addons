@@ -51,6 +51,8 @@ ERR_JOINED_GROUP_S = "%s schließt sich der Gruppe an."
 ERR_RAID_MEMBER_ADDED_S = "%s hat sich der Schlachtzugsgruppe angeschlossen."
 LOOT_ITEM = "%s bekommt Beute: %s."
 LOOT_ITEM_SELF = "Ihr erhaltet Beute: %s."
+ERR_TRADE_COMPLETE = "Handel abgeschlossen."
+ERR_TRADE_CANCELLED = "Handel abgebrochen."
 
 -- Group state.
 local party, raid, isLeader = {}, {}, true
@@ -58,10 +60,16 @@ local invited = {}
 local now = 1000
 GetTime = function() return now end
 time = function() return math.floor(1760000000 + now) end
-UnitName = function(u) if u == "player" then return "Rüdiger" end local i = tonumber(string.match(u, "party(%d)")) return i and party[i] end
+local tradePartner, targetName
+UnitName = function(u)
+    if u == "player" then return "Rüdiger" end
+    if u == "NPC" then return tradePartner end
+    if u == "target" then return targetName end
+    local i = tonumber(string.match(u, "party(%d)")) return i and party[i]
+end
 GetNumPartyMembers = function() return #raid > 0 and 0 or #party end
 GetNumRaidMembers = function() return #raid end
-GetRaidRosterInfo = function(i) local r = raid[i] if r then return r.name, 0, r.group end end
+GetRaidRosterInfo = function(i) local r = raid[i] if r then return r.name, 0, r.group, 80, "Krieger", r.class or "WARRIOR" end end
 IsRaidLeader, IsRaidOfficer, IsPartyLeader = function() return isLeader end, function() return false end, function() return isLeader end
 InviteUnit = function(name) invited[#invited + 1] = name end
 ConvertToRaid = function()
@@ -80,7 +88,10 @@ GetGuildRosterInfo = function(i) local g = guild[i] return g[1], nil, nil, nil, 
 local lootSlots, target = {}, nil
 GetLootMethod = function() return "master", nil, 1 end
 UnitIsUnit = function(a, b) return a == "raid1" and b == "player" end
-UnitExists = function(u) return u == "target" and target ~= nil end
+UnitExists = function(u) return u == "target" and (target ~= nil or targetName ~= nil) end
+UnitIsPlayer = function(u) return u == "target" and targetName ~= nil end
+local tradeSlots = {}
+GetTradePlayerItemLink = function(i) return tradeSlots[i] end
 UnitIsDead = function() return true end
 UnitGUID = function() return target end
 GetLootThreshold = function() return 4 end
@@ -179,14 +190,86 @@ local exported = RaidSyncLootExport.text
 print("---- export ----\n" .. exported .. "\n----------------")
 local expected = table.concat({
     "RS1|LOOT|7|Rüdiger|" .. RaidSyncDB.loot.startedAt,
-    "%d+|36612|50415|Aaron",
-    "%d+|36612|52027|Rüdiger",
-    "%d+|37970|50074|%-",
+    "1|%d+|36612|50415|Aaron|given",
+    "2|%d+|36612|52027|Rüdiger|held",
+    "3|%d+|37970|50074|%-|%-",
 }, "\n")
 check(string.match(exported, "^" .. expected .. "$") ~= nil, "loot export format")
+check(string.find(RaidSyncLootList.text, "(bei dir)", 1, true) ~= nil, "held drop marked in the list")
 clickButton("Letzten entfernen")
 clickButton("Export")
 check(string.find(RaidSyncLootExport.text, "50074", 1, true) == nil, "removed drop left out of the export")
+
+-- Trades of items the recorder looted to himself.
+local badge = "|cffa335ee|Hitem:52027:0|h[Weiheabzeichen]|h|r"
+local function doTrade(partner, links, finish)
+    tradePartner = partner
+    fire("TRADE_SHOW")
+    tradeSlots = links
+    fire("TRADE_PLAYER_ITEM_CHANGED", 1)
+    fire("TRADE_ACCEPT_UPDATE", 1, 1)
+    if finish == "cancel" then
+        fire("UI_INFO_MESSAGE", ERR_TRADE_CANCELLED)
+        fire("TRADE_CLOSED")
+    else
+        -- The window may close before the confirmation arrives.
+        fire("TRADE_CLOSED")
+        tradeSlots = {}
+        fire("UI_INFO_MESSAGE", ERR_TRADE_COMPLETE)
+    end
+end
+doTrade("Shanna", { badge }, "cancel")
+check(RaidSyncDB.loot.entries[2].recipient == "Rüdiger" and RaidSyncDB.loot.entries[2].state == "held", "cancelled trade keeps the drop held")
+doTrade("Shanna", { badge })
+check(RaidSyncDB.loot.entries[2].recipient == "Shanna" and RaidSyncDB.loot.entries[2].state == "given", "completed trade hands the held drop to the partner")
+doTrade("Carla", { "|cffa335ee|Hitem:50415:0:0:0:0:0:0:0:80|h[Bryntroll]|h|r" })
+check(RaidSyncDB.loot.entries[1].recipient == "Aaron", "trading an item the recorder does not hold changes nothing")
+-- Two identical drops looted to himself, both traded away in one window.
+target = "0xF13000"..string.format("%04X", 36597).."000555"
+lootSlots = { { link = badge, quality = 4 }, { link = badge, quality = 4 } }
+fire("LOOT_OPENED")
+candidates = { "Rüdiger" }
+hooks.GiveMasterLoot(1, 1)
+hooks.GiveMasterLoot(2, 1)
+fire("LOOT_CLOSED")
+check(RaidSyncDB.loot.entries[4].state == "held" and RaidSyncDB.loot.entries[5].state == "held", "self-assigned drops are held")
+local openShown = false
+for _, f in ipairs(frames) do if string.find(f.text or "", "2 noch zu verteilen", 1, true) then openShown = true end end
+check(openShown, "status counts drops still to hand out")
+doTrade("Carla", { badge })
+check(RaidSyncDB.loot.entries[4].recipient == "Carla" and RaidSyncDB.loot.entries[5].state == "held", "one traded badge moves only one entry")
+doTrade("Bert", { badge, badge })
+check(RaidSyncDB.loot.entries[5].recipient == "Bert", "second badge follows the next trade")
+check(RaidSyncDB.loot.entries[4].recipient == "Carla", "already given badge is not traded again")
+
+-- Manual correction for drops another player passed on.
+slash("an 1 Bert")
+check(RaidSyncDB.loot.entries[1].recipient == "Bert" and RaidSyncDB.loot.entries[1].state == "manual", "/rs an sets recipient by name and keeps its case")
+target, targetName = nil, "Thorgrim"
+slash("an 4")
+check(RaidSyncDB.loot.entries[4].recipient == "Thorgrim" and RaidSyncDB.loot.entries[4].state == "manual", "/rs an without name uses the target")
+targetName = nil
+slash("an 3 Bert")
+check(RaidSyncDB.loot.entries[3].recipient == nil, "removed drop cannot be reassigned")
+clickButton("Export")
+local after = RaidSyncLootExport.text
+check(string.find(after, "\n1|%d+|36612|50415|Bert|manual") ~= nil, "entry id stays stable after reassignment")
+check(string.find(after, "\n5|%d+|36597|52027|Bert|given") ~= nil, "traded drop exported as given")
+
+-- Roster export: everyone seen in the raid, late additions last.
+now = now + 3600
+raid[#raid + 1] = { name = "Weltchat", group = 4, class = "PALADIN" }
+fire("RAID_ROSTER_UPDATE")
+clickButton("Aufstellung exportieren")
+local roster = RaidSyncRosterExport.text
+print("---- roster ----\n" .. roster .. "\n----------------")
+check(string.match(roster, "^RS1|ROSTER|7|Rüdiger|%d+\n") ~= nil, "roster export header")
+check(string.find(roster, "\nShanna|WARRIOR|%d+") ~= nil, "early member listed")
+check(string.match(roster, "\nWeltchat|PALADIN|(%d+)$") == tostring(time()), "late addition listed last with its join time")
+table.remove(raid)
+fire("RAID_ROSTER_UPDATE")
+clickButton("Aufstellung exportieren")
+check(string.find(RaidSyncRosterExport.text, "Weltchat", 1, true) ~= nil, "member who left stays in the roster export")
 
 local out = io.open(arg[2], "w")
 out:write(exported)

@@ -1,9 +1,13 @@
 -- RaidSync for WoW 3.3.5a
 -- Exchanges copy-and-paste text with the raid website:
 --   * Invite tab: paste the roster export (RS1|INV|...) and invite everyone.
---   * Loot tab:   record master-loot drops and copy the loot export (RS1|LOOT|...).
--- /rs            toggle window
--- /rs del <n>    remove recorded drop number n from the export
+--   * Invite tab: export who is actually in the raid (RS1|ROSTER|...), e.g. after
+--                 filling up via the world chat.
+--   * Loot tab:   record master-loot drops, follow trades of items the recorder
+--                 holds, and copy the loot export (RS1|LOOT|...).
+-- /rs                  toggle window
+-- /rs del <n>          remove recorded drop number n from the export
+-- /rs an <n> [name]    set the recipient of drop n (without a name: current target)
 
 local FORMAT = "RS1"
 local INVITE_DELAY = 0.3   -- seconds between invites
@@ -68,15 +72,50 @@ function Core.ParseInvite(text)
 end
 
 -- BuildLootExport renders "RS1|LOOT|<raidID>|<recorder>|<startUnix>" followed by
--- "<unixTime>|<npcID or ->|<itemID>|<recipient or ->" for every kept entry.
+-- "<entryID>|<unixTime>|<npcID or ->|<itemID>|<recipient or ->|<state or ->" for
+-- every kept entry. The entry ID stays the same when the recipient changes later,
+-- so the website recognises lines it already imported.
 function Core.BuildLootExport(raidID, recorder, startedAt, entries)
     local lines = { table.concat({ FORMAT, "LOOT", tostring(raidID or 0), Core.Field(recorder), tostring(startedAt or 0) }, "|") }
     for _, e in ipairs(entries) do
         if not e.deleted then
-            lines[#lines + 1] = table.concat({ tostring(e.time), e.npc and tostring(e.npc) or "-", tostring(e.item), e.recipient and Core.Field(e.recipient) or "-" }, "|")
+            lines[#lines + 1] = table.concat({ tostring(e.id), tostring(e.time), e.npc and tostring(e.npc) or "-", tostring(e.item), e.recipient and Core.Field(e.recipient) or "-", e.recipient and (e.state or "given") or "-" }, "|")
         end
     end
     return table.concat(lines, "\n")
+end
+
+-- BuildRosterExport renders "RS1|ROSTER|<raidID>|<recorder>|<exportUnix>" followed by
+-- "<name>|<classToken>|<firstSeenUnix>" for everyone seen in the raid, earliest first.
+function Core.BuildRosterExport(raidID, recorder, exportedAt, seen)
+    local list = {}
+    for _, s in pairs(seen) do list[#list + 1] = s end
+    table.sort(list, function(a, b)
+        if a.first ~= b.first then return a.first < b.first end
+        return string.lower(a.name) < string.lower(b.name)
+    end)
+    local lines = { table.concat({ FORMAT, "ROSTER", tostring(raidID or 0), Core.Field(recorder), tostring(exportedAt or 0) }, "|") }
+    for _, s in ipairs(list) do
+        lines[#lines + 1] = table.concat({ Core.Field(s.name), Core.Field(s.class or "-"), tostring(s.first) }, "|")
+    end
+    return table.concat(lines, "\n")
+end
+
+-- ApplyTrade hands every traded item to the trade partner: each item ID moves the
+-- oldest kept entry of that item the trader still holds. Returns the moved entries.
+function Core.ApplyTrade(entries, trader, partner, itemIDs)
+    local moved, used = {}, {}
+    for _, itemID in ipairs(itemIDs) do
+        for i, e in ipairs(entries) do
+            if not used[i] and not e.deleted and e.item == itemID and e.recipient and string.lower(e.recipient) == string.lower(trader) then
+                used[i] = true
+                e.recipient, e.state, e.confirmed = partner, "given", true
+                moved[#moved + 1] = e
+                break
+            end
+        end
+    end
+    return moved
 end
 
 function Core.Field(s)
@@ -142,6 +181,8 @@ local queue, inviting, inviteDelay = {}, false, 0
 local currentSlots = {}
 local lastKill
 local patterns = {}
+local trade -- { partner, items, closedAt } of the open or just closed trade window
+local TRADE_GRACE = 5 -- seconds a closed trade window may still be confirmed
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffRaidSync:|r " .. msg)
@@ -237,6 +278,8 @@ end
 local function EntryLabel(i, e)
     local boss = e.npc and ("NPC " .. e.npc) or "Boss unbekannt"
     local who = e.recipient or "|cffff8800nicht vergeben|r"
+    if e.recipient and e.state == "held" then who = who .. " |cffffff00(bei dir)|r" end
+    if e.state == "manual" then who = who .. " (manuell)" end
     local line = string.format("%d. %s  %s  -> %s", i, e.link or ("Item " .. e.item), boss, who)
     if e.deleted then line = "|cff777777" .. string.gsub(line, "|c%x%x%x%x%x%x%x%x", "") .. " (entfernt)|r" end
     return line
@@ -244,14 +287,16 @@ end
 
 local function RefreshLoot()
     if not UI.lootList then return end
-    local lines, kept = {}, 0
+    local lines, kept, held = {}, 0, 0
     for i, e in ipairs(db.loot.entries) do
         lines[#lines + 1] = EntryLabel(i, e)
         if not e.deleted then kept = kept + 1 end
+        if not e.deleted and e.state == "held" then held = held + 1 end
     end
     SetReadOnly(UI.lootList, table.concat(lines, "\n"))
     local state = db.loot.recording and "|cff00ff00Aufzeichnung läuft|r" or "Aufzeichnung gestoppt"
-    UI.lootStatus:SetText(string.format("%s   %d Drops", state, kept))
+    local open = held > 0 and string.format("   |cffffff00%d noch zu verteilen|r", held) or ""
+    UI.lootStatus:SetText(string.format("%s   %d Drops%s", state, kept, open))
     UI.recordButton:SetText(db.loot.recording and "Stoppen" or "Aufzeichnen")
 end
 
@@ -267,6 +312,7 @@ local function ReadInviteText()
     end
     for _, line in ipairs(bad) do Print("|cffff8800Zeile übersprungen:|r " .. line) end
     members = list
+    if not db.raid or db.raid.id ~= raid.id then db.rosterSeen = {} end
     db.raid = raid
     db.members = list
     if not db.loot.recording and #db.loot.entries == 0 then
@@ -340,7 +386,38 @@ local function InviteStep()
     RefreshInvites()
 end
 
+-- RecordRoster remembers everyone who was in the raid and since when, so late
+-- additions from the world chat can go back to the website.
+local function RecordRoster()
+    if GetNumRaidMembers() == 0 then return end
+    db.rosterSeen = db.rosterSeen or {}
+    for i = 1, GetNumRaidMembers() do
+        local name, _, _, _, _, classToken = GetRaidRosterInfo(i)
+        if name and not db.rosterSeen[Lower(name)] then
+            db.rosterSeen[Lower(name)] = { name = name, class = classToken, first = time() }
+        end
+    end
+end
+
+local function ExportRoster()
+    local raidID = (db.raid and db.raid.id) or tonumber(UI.raidIDBox:GetText())
+    if not raidID then
+        Print("Bitte zuerst den Einladungs-Export einlesen oder im Loot-Tab eine Raid-ID eintragen.")
+        return
+    end
+    RecordRoster()
+    if not next(db.rosterSeen or {}) then
+        Print("Noch niemand im Raid gesehen.")
+        return
+    end
+    UI.rosterExport:SetText(Core.BuildRosterExport(raidID, UnitName("player"), time(), db.rosterSeen))
+    UI.rosterExport:SetFocus()
+    UI.rosterExport:HighlightText()
+    Print("Aufstellung markiert - mit Strg+C kopieren und auf der Raidseite unter Aufstellung einfügen.")
+end
+
 local function UpdateGroupStatus()
+    RecordRoster()
     local inGroup = GroupNames()
     for _, m in ipairs(members) do
         if inGroup[Lower(m.name)] then
@@ -396,6 +473,17 @@ end
 -- Loot
 ---------------------------------------------------------------------------
 
+-- AssignRecipient marks items the recorder gives to himself as held until a
+-- trade or a manual assignment names the real winner.
+local function AssignRecipient(e, name, state)
+    e.recipient = name
+    if Lower(name) == Lower(UnitName("player")) then
+        e.state = "held"
+    else
+        e.state = state or "given"
+    end
+end
+
 local function IsMasterLooter()
     local method, partyMaster, raidMaster = GetLootMethod()
     if method ~= "master" then return false end
@@ -421,7 +509,8 @@ local function OnLootOpened()
             local key = sourceKey .. ":" .. slot .. ":" .. itemID
             local index = db.loot.sources[key]
             if not index then
-                db.loot.entries[#db.loot.entries + 1] = { time = time(), npc = npc, item = itemID, link = link }
+                db.loot.nextID = (db.loot.nextID or 0) + 1
+                db.loot.entries[#db.loot.entries + 1] = { id = db.loot.nextID, time = time(), npc = npc, item = itemID, link = link }
                 index = #db.loot.entries
                 db.loot.sources[key] = index
                 added = added + 1
@@ -440,7 +529,7 @@ local function OnMasterLootGiven(slot, candidate)
     if not index then return end
     local name = GetMasterLootCandidate(candidate)
     if name then
-        db.loot.entries[index].recipient = name
+        AssignRecipient(db.loot.entries[index], name)
         RefreshLoot()
     end
 end
@@ -467,11 +556,76 @@ local function OnLootMessage(msg)
     for i = 1, #entries do
         local e = entries[i]
         if not e.deleted and e.item == itemID and not e.recipient then
-            e.recipient, e.confirmed = name, true
+            AssignRecipient(e, name)
+            e.confirmed = true
             RefreshLoot()
             return
         end
     end
+end
+
+-- Trades: the recorder hands out items he looted to himself after the rolls.
+local function SnapshotTrade()
+    if not trade or trade.closedAt then return end
+    local items = {}
+    for slot = 1, 6 do
+        local itemID = Core.ItemIDFromLink(GetTradePlayerItemLink(slot))
+        if itemID then items[#items + 1] = itemID end
+    end
+    trade.items = items
+end
+
+local function OnTradeShow()
+    trade = { partner = UnitName("NPC"), items = {} }
+end
+
+local function OnTradeClosed()
+    if trade then trade.closedAt = GetTime() end
+end
+
+local function OnTradeComplete()
+    if not trade or not trade.partner or (trade.closedAt and GetTime() - trade.closedAt > TRADE_GRACE) then
+        trade = nil
+        return
+    end
+    local moved = Core.ApplyTrade(db.loot.entries, UnitName("player"), trade.partner, trade.items)
+    trade = nil
+    for _, e in ipairs(moved) do
+        Print(string.format("Handel erfasst: %s -> %s", e.link or ("Item " .. e.item), e.recipient))
+    end
+    if #moved > 0 then RefreshLoot() end
+end
+
+local function OnInfoMessage(...)
+    -- 3.3.5 passes only the message; later clients pass a message type first.
+    local msg = select(select("#", ...), ...)
+    if msg == ERR_TRADE_COMPLETE then
+        OnTradeComplete()
+    elseif msg == ERR_TRADE_CANCELLED then
+        trade = nil
+    end
+end
+
+-- SetEntryRecipient corrects a drop by hand, e.g. when someone else held a
+-- unique item for a moment and traded it on to the winner.
+local function SetEntryRecipient(n, name)
+    local e = db.loot.entries[n]
+    if not e or e.deleted then
+        Print("Keinen Drop Nummer " .. tostring(n) .. " gefunden.")
+        return
+    end
+    name = Core.Trim(name or "")
+    if name == "" then
+        if not UnitExists("target") or not UnitIsPlayer("target") then
+            Print("Bitte einen Namen angeben oder den Gewinner ins Ziel nehmen.")
+            return
+        end
+        name = UnitName("target")
+    end
+    AssignRecipient(e, Core.Field(name), "manual")
+    e.confirmed = true
+    Print(string.format("Drop %d geht an %s.", n, e.recipient))
+    RefreshLoot()
 end
 
 local function ToggleRecording()
@@ -517,7 +671,7 @@ local function RemoveLast()
 end
 
 local function ClearLoot()
-    db.loot = { entries = {}, sources = {}, recording = false, raidID = db.loot.raidID }
+    db.loot = { entries = {}, sources = {}, recording = false, raidID = db.loot.raidID, nextID = 0 }
     UI.exportBox:SetText("")
     RefreshLoot()
     Print("Aufzeichnung geleert.")
@@ -608,7 +762,10 @@ local function BuildInvitePanel(panel)
     bench:SetScript("OnClick", function(self) db.includeBench = self:GetChecked() and true or false end)
     _G[bench:GetName() .. "Text"]:SetText("Ersatzbank mit einladen")
 
-    local listBox, list = MakeScrollEdit(panel, "RaidSyncInviteList", 420, 220, true)
+    local exportRoster = Button(panel, "Aufstellung exportieren", 150, ExportRoster)
+    exportRoster:SetPoint("TOPRIGHT", sort, "BOTTOMRIGHT", 0, -4)
+
+    local listBox, list = MakeScrollEdit(panel, "RaidSyncInviteList", 420, 160, true)
     listBox:SetPoint("TOPLEFT", bench, "BOTTOMLEFT", 4, -2)
     UI.inviteList = list
 
@@ -616,6 +773,11 @@ local function BuildInvitePanel(panel)
     status:SetPoint("TOPLEFT", listBox, "BOTTOMLEFT", 0, -6)
     status:SetWidth(420)
     UI.inviteStatus = status
+
+    local rosterBox, rosterEdit = MakeScrollEdit(panel, "RaidSyncRosterExport", 420, 50)
+    rosterBox:SetPoint("TOPLEFT", status, "BOTTOMLEFT", 0, -8)
+    rosterEdit:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+    UI.rosterExport = rosterEdit
 end
 
 local function BuildLootPanel(panel)
@@ -655,7 +817,19 @@ local function BuildLootPanel(panel)
     exportEdit:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
     UI.exportBox = exportEdit
 
-    local hint = Label(panel, "Nur als Plündermeister wird aufgezeichnet. Einzelne Drops: /rs del <Nummer>", "GameFontDisableSmall")
+    local numberLabel = Label(panel, "Nr:")
+    numberLabel:SetPoint("LEFT", clear, "RIGHT", 12, 0)
+    local numberBox = CreateFrame("EditBox", "RaidSyncEntryNumber", panel, "InputBoxTemplate")
+    numberBox:SetWidth(30)
+    numberBox:SetHeight(20)
+    numberBox:SetAutoFocus(false)
+    numberBox:SetNumeric(true)
+    numberBox:SetPoint("LEFT", numberLabel, "RIGHT", 8, 0)
+    numberBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    local toTarget = Button(panel, "An Ziel", 60, function() SetEntryRecipient(tonumber(numberBox:GetText()), nil) end)
+    toTarget:SetPoint("LEFT", numberBox, "RIGHT", 4, 0)
+
+    local hint = Label(panel, "Nur als Plündermeister wird aufgezeichnet; Handel von dir gelooteter Items wird erkannt. Empfänger ändern: Nr + 'An Ziel' oder /rs an <Nr> <Name>. Entfernen: /rs del <Nr>", "GameFontDisableSmall")
     hint:SetPoint("TOPLEFT", exportBox, "BOTTOMLEFT", 0, -4)
     hint:SetWidth(420)
 end
@@ -768,6 +942,11 @@ events:RegisterEvent("PARTY_MEMBERS_CHANGED")
 events:RegisterEvent("LOOT_OPENED")
 events:RegisterEvent("LOOT_CLOSED")
 events:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+events:RegisterEvent("TRADE_SHOW")
+events:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
+events:RegisterEvent("TRADE_ACCEPT_UPDATE")
+events:RegisterEvent("TRADE_CLOSED")
+events:RegisterEvent("UI_INFO_MESSAGE")
 
 events:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
@@ -777,6 +956,13 @@ events:SetScript("OnEvent", function(self, event, ...)
         db.loot = db.loot or {}
         db.loot.entries = db.loot.entries or {}
         db.loot.sources = db.loot.sources or {}
+        db.loot.nextID = db.loot.nextID or 0
+        for _, e in ipairs(db.loot.entries) do
+            if not e.id then
+                db.loot.nextID = db.loot.nextID + 1
+                e.id = db.loot.nextID
+            end
+        end
         members = db.members or {}
         BuildPatterns()
         BuildUI()
@@ -793,6 +979,14 @@ events:SetScript("OnEvent", function(self, event, ...)
         OnLootOpened()
     elseif event == "LOOT_CLOSED" then
         wipe(currentSlots)
+    elseif event == "TRADE_SHOW" then
+        OnTradeShow()
+    elseif event == "TRADE_PLAYER_ITEM_CHANGED" or event == "TRADE_ACCEPT_UPDATE" then
+        SnapshotTrade()
+    elseif event == "TRADE_CLOSED" then
+        OnTradeClosed()
+    elseif event == "UI_INFO_MESSAGE" then
+        OnInfoMessage(...)
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         local _, subEvent, _, _, _, destGUID = ...
         if subEvent == "UNIT_DIED" then
@@ -815,10 +1009,14 @@ end)
 SLASH_RAIDSYNC1 = "/rs"
 SLASH_RAIDSYNC2 = "/raidsync"
 SlashCmdList["RAIDSYNC"] = function(msg)
-    msg = Core.Trim(string.lower(msg or ""))
+    local raw = Core.Trim(msg or "")
+    msg = string.lower(raw)
     local n = string.match(msg, "^del%s+(%d+)$")
+    local assign, name = string.match(raw, "^[aA][nN]%s+(%d+)%s*(.-)$")
     if n then
         RemoveEntry(tonumber(n))
+    elseif assign then
+        SetEntryRecipient(tonumber(assign), name)
     elseif UI.frame:IsShown() then
         UI.frame:Hide()
     else
