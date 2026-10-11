@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: InviteMailer
+## Notes: Mails invite codes to a list of characters, one letter per name.
+## Author: klaud
+## Version: 1.0
+## SavedVariables: InviteMailerDB
+
+InviteMailer.lua
