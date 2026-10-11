@@ -1,3 +1,290 @@
-# wow-addons
+# 🛡️ WoW 3.3.5a — Guild Raid Addons
 
-WoW 3.3.5a addons for the guild raid website.
+Small, purpose-built **World of Warcraft: Wrath of the Lich King (3.3.5a)** addons for coordinating raids with a guild raid website. The addons work with **copy-and-paste exports**: no external client, API key, or live website connection is needed in game.
+
+> **Client compatibility:** These addons target the **3.3.5a / Interface 30300** client, not modern retail WoW. Some UI labels and chat output are in **German**.
+
+## ✨ At a glance
+
+| Addon | What it does | Open it |
+| --- | --- | --- |
+| **[RaidSync](#-raidsync)** | Imports a raid signup list and sends invites, tracks everyone seen in the raid, sorts raid groups by signup role, and records master-loot drops and subsequent trades for website import. | `/rs` or `/raidsync` |
+| **[InviteMailer](#-invitemailer)** | Sends personalized in-game letters containing individual invite codes, keeps sent history to avoid duplicate mail, and offers failed-recipient retries. | `/im` or `/invitemailer` |
+
+Both addons can be installed and enabled independently.
+
+## 📦 Installation
+
+1. Download this repository using **Code → Download ZIP**, or clone it:
+
+   ```bash
+   git clone https://github.com/robinschweitz/wow-addons.git
+   ```
+
+2. Copy **the individual addon folders** `RaidSync` and/or `InviteMailer` into your WoW installation's `Interface/AddOns/` directory. Do **not** copy only their `.lua` files, and don't nest an extra `wow-addons` folder around them.
+3. Check that your files look like this:
+
+   ```text
+   World of Warcraft/
+   └── Interface/
+       └── AddOns/
+           ├── RaidSync/
+           │   ├── RaidSync.toc
+           │   └── RaidSync.lua
+           └── InviteMailer/
+               ├── InviteMailer.toc
+               └── InviteMailer.lua
+   ```
+
+4. Restart WoW (or reload its UI after installing), choose **AddOns** at the character-selection screen, and enable the addon(s).
+5. Log in and type `/rs` or `/im` to open their draggable windows. Press **Esc** to close a window.
+
+**Note:** The repository is designed to complement a particular guild raid website. The website must provide and accept the text formats described below; the addon does not discover or contact a website automatically.
+
+---
+
+## ⚔️ RaidSync
+
+**RaidSync** combines three raid-leader workflows in one window: **Invite**, **Attendance/roster export**, and **Loot**. Open the window with `/rs` and switch between its **Einladen** (Invites) and **Loot** tabs.
+
+### 1. Import the raid signups and invite players
+
+On the raid website, go to **Raid → Aufstellung → “Einladungen für Addon”** and copy the invitation export.
+
+1. Open `/rs` and select the **Einladen** tab.
+2. Paste the complete export into the top text box.
+3. Click **Einlesen** (*Read/import*). The addon displays the imported characters, their roles/classes, and their invitation status.
+4. Leave **Ersatzbank mit einladen** unchecked to exclude bench players, or check it to include them.
+5. Click **Alle einladen** (*Invite all*). You must be the party leader, raid leader, or raid assistant as appropriate.
+6. Watch the status list as characters are invited, join, decline, or cannot be found. Click **Fehlende erneut** (*Retry missing*) to attempt eligible non-joined characters again.
+
+**How it works:**
+
+- Invitations are queued in the **website export order**, with about **0.3 seconds** between sends.
+- When beginning alone, the addon respects party-size limits while invites are pending. After another player joins and you're party leader, it can **convert the party into a raid** to continue inviting.
+- A pending invitation stops reserving a party slot after roughly **65 seconds**, at which point the member may show **keine Antwort** (*no response*).
+- Known **offline guild members** are skipped based on the currently available guild roster. Players not found in the guild roster are **not automatically assumed offline**.
+- It updates status based on game messages and actual party/raid roster changes. Statuses include **offen** (open), **eingeladen** (invited), **im Raid** (in raid), **abgelehnt** (declined), **nicht gefunden** (not found), **in anderer Gruppe** (already in another group), **offline**, **keine Antwort**, and **Ersatzbank** (bench).
+- **Fehlende erneut** may retry previously failed/declined invitees; it skips players currently in the group, players with an invitation still pending, known offline guild members, and excluded bench members.
+
+#### Example website invite export
+
+```text
+RS1|INV|42|ICC 25 Wednesday|25
+Thorgar|TANK|Warrior|0
+Aelira|HEAL|Priest|0
+Frostlin|DD|Mage|0
+Standby|DD|Hunter|1
+```
+
+The header contains **format version | INV | raid ID | raid name | planned raid size**. Each character line contains **name | role | class | bench flag** (`0` = main roster, `1` = bench). Roles supported for sorting are `TANK`, `HEAL`, and `DD`. This format is normally **generated by the raid website**, not written by hand.
+
+### 2. Arrange raid groups
+
+Click **Gruppen sortieren** (*Sort groups*) while you're raid leader or assistant in a raid.
+
+The addon looks at **members currently in the raid** and prioritizes **TANK → HEAL → DD**, with names used to break ties. It then aims to place players into consecutive five-person subgroups using WoW's subgroup move/swap API.
+
+**Important:** This is a simple role-priority sorter, **not** an encounter-aware raid-composition optimizer. It does not guarantee one tank or healer per group, preserve existing party synergies, or infer roles for players absent from the imported roster. Check the final groups before pulling.
+
+### 3. Export everyone who attended
+
+RaidSync also remembers characters it has **seen in the raid roster**, including late additions from world chat who were never in the original signup export.
+
+1. Keep RaidSync enabled while the raid is forming/running.
+2. In **Einladen**, click **Aufstellung exportieren** (*Export roster*).
+3. The generated text is selected automatically. Press **Ctrl+C** to copy it.
+4. Paste it into the raid website's **Aufstellung** (*Roster*) import area.
+
+The export contains each observed character's name, class token, and **first-seen Unix timestamp**, ordered by first appearance. Players who subsequently leave remain in this attendance history. Importing an invitation export for a **different raid ID** resets the seen-roster list.
+
+```text
+RS1|ROSTER|42|Raidleader|1760000000
+Thorgar|WARRIOR|1760000010
+Aelira|PRIEST|1760000020
+Latejoin|PALADIN|1760001200
+```
+
+The header is **format | ROSTER | raid ID | exporting character | export timestamp**. The timestamps above are illustrative.
+
+**Attendance caveat:** “Seen in the raid” is not the same as verified boss participation, and first-seen time is **when RaidSync noticed the character**, not necessarily their exact join time. Only raid members observed while the addon is running can be captured.
+
+### 4. Record and export loot
+
+The **Loot** tab logs eligible items from a loot window **only while recording is enabled and the recording player is the master looter**.
+
+1. Enter the website's **Raid-ID**, or first import the invitation export to fill it automatically.
+2. Ensure the in-game loot method is **Master Loot** and you are the **master looter**.
+3. Click **Aufzeichnen** (*Start recording*) **before** opening the loot windows you wish to track. The button changes to **Stoppen** (*Stop*).
+4. Open the boss/chest loot and distribute it normally. RaidSync records item IDs, the drop source where available, timestamps, and recipients.
+5. Inspect the list and correct any uncertain recipients.
+6. Click **Export**, then **Ctrl+C**, and paste the text into the website's **Loot** import area.
+
+**What is recorded and how:**
+
+- On opening a loot window, it registers linked items meeting the game's **current loot-quality threshold** (for example epic items if set to epic), not every grey/green item.
+- It uses the dead target's creature GUID where possible, or the most recently observed NPC death as a fallback for sources such as chests. Boss/source identification may therefore be **unknown or approximate**.
+- It tracks master-loot assignments and relevant loot chat messages to associate an item with a recipient.
+- It deduplicates repeated views of the same loot source/slot/item so reopening the window does not normally create another drop.
+- If you master-loot an item **to yourself** to distribute later, its status becomes **held** (`bei dir`). A **successfully completed trade of that item from your own trade window** changes the oldest matching held entry to the trade partner. Cancelled trades do not transfer ownership in the log.
+- It **does not follow trades between other players**. If another raider receives an item and passes it on, use a **manual recipient correction**.
+- Existing entries remain available when recording is stopped, until you clear the log.
+
+#### Correcting the log
+
+| Action | How |
+| --- | --- |
+| Assign a drop to a named player | `/rs an 2 Playername` |
+| Assign a drop to your current player target | Target them, then `/rs an 2`, or enter **Nr** and click **An Ziel** |
+| Exclude a mistaken drop from the export | `/rs del 2` |
+| Exclude the last non-deleted entry | **Letzten entfernen** |
+| Clear all recorded loot | **Leeren** and confirm |
+
+**Drop numbers are the numbered positions shown in the loot list.** A removed entry remains visually marked as removed, but is omitted from subsequent exports. Recipient corrections preserve the drop's stable export ID, allowing the website to identify an already imported item after a later correction. Re-export after making corrections.
+
+#### Example loot export
+
+```text
+RS1|LOOT|42|Raidleader|1760000000
+1|1760000300|36612|50415|Thorgar|given
+2|1760000301|36612|52027|Raidleader|held
+3|1760000400|-|50074|-|-
+```
+
+The header is **format | LOOT | raid ID | recording character | recording start time**. Each item line contains **stable entry ID | drop timestamp | NPC ID (or `-`) | item ID | recipient (or `-`) | state (or `-`)**.
+
+Common exported states:
+
+- `given`: item attributed to a player, including a completed tracked trade.
+- `held`: currently logged as held by the recorder for later distribution.
+- `manual`: corrected by assigning a recipient manually.
+- `-`: no recipient confirmed/assigned.
+
+**Before your next raid:** Finish exporting and importing the current log, then use **Leeren** to clear the recorded loot. Clearing is destructive; it starts a new loot log and resets the recorded start time, while leaving the raid-ID field available.
+
+---
+
+## ✉️ InviteMailer
+
+**InviteMailer** automates personalized **in-game mail**, particularly for distributing distinct invite codes for a guild's loot-wishlist website. It sends one letter per recipient while the **WoW mailbox is open**.
+
+### Send a batch of codes
+
+1. Open an **in-game mailbox**.
+2. Type `/im` (or `/invitemailer`) to open InviteMailer.
+3. Edit the **Subject** and **Letter text** templates.
+4. Paste a recipient list, **one character and code per line**.
+5. Press **Start**. Keep the mailbox open until sending finishes.
+6. Watch the **Sent / Failed** status and chat messages. If necessary, click **Load failed**, fix any incorrect names, and press **Start** again.
+
+For example, the recipient list can be:
+
+```text
+Thorgar:ABCD-1234
+Aelira:EFGH-5678
+Frostlin:IJKL-9012
+```
+
+The parser also accepts `Name,Code`, `Name;Code`, and `Name Code` (a single whitespace separator) instead of `Name:Code`. Blank lines are ignored and malformed lines are reported as skipped. The template supports two placeholders:
+
+| Placeholder | Replaced with |
+| --- | --- |
+| `{name}` | Character name on that line |
+| `{code}` | The corresponding private invite code |
+
+Example:
+
+**Subject:** `Your invitation, {name}`
+
+**Body:**
+
+```text
+Hi {name},
+
+Your loot-wishlist invite code is: {code}
+
+See you in the raid!
+```
+
+Each recipient gets the **same template**, with only their own name and code substituted.
+
+### Sending behavior and safety checks
+
+- It sends letters **sequentially**, allowing about **0.5 seconds between successful/result-confirmed sends**.
+- It waits for the server's mail success/failure event, with a **15-second timeout** to classify an unanswered attempt as failed.
+- The addon checks for at least **30 copper postage** before attempting each letter and prints the total planned postage before starting.
+- Press **Stop** to pause sending. Closing the mailbox also pauses the operation. Mail cannot be sent with the mailbox closed.
+- Clicking **Load failed** replaces the recipient editor with **only this run's failed entries**, useful for correcting names and retrying.
+- On a successful send, it stores the recipient's name (case-insensitively) and code in `InviteMailerDB.sent`. **Later runs skip any previously successful recipient name**, even if their code in the pasted list has changed.
+- Use `/im reset` to **clear that sent history** and allow resending to those names.
+
+**Please read before bulk sending:** There is **no per-message confirmation prompt**; pressing Start initiates mail delivery. Validate the list and template first. The addon warns when the first expanded body exceeds **500 characters**, but does not guarantee delivery of an oversized body. A timeout is treated as a failure even if the server might have delivered that mail; verify uncertain results before retrying to avoid duplicates. Sent history is a convenience safeguard, **not** a delivery audit.
+
+---
+
+## ⌨️ Command reference
+
+| Command | Effect |
+| --- | --- |
+| `/rs`, `/raidsync` | Toggle RaidSync |
+| `/rs del <number>` | Mark one loot-list entry as removed from exports |
+| `/rs an <number> <name>` | Correct the recipient for one loot-list entry |
+| `/rs an <number>` | Correct the recipient to your currently targeted player |
+| `/im`, `/invitemailer` | Toggle InviteMailer |
+| `/im reset` | Forget InviteMailer's successfully mailed recipients so they may be sent mail again |
+
+Examples: `/rs del 3`, `/rs an 1 Thorgar`, `/im reset`.
+
+## 💾 Saved data and privacy
+
+Both addons use standard **WoW SavedVariables**, written by the client as part of its normal saved-settings process:
+
+| SavedVariable | Contains |
+| --- | --- |
+| `RaidSyncDB` | Imported raid and character data, invite text/statuses, observed roster, loot entries, recording state, and UI-related settings |
+| `InviteMailerDB` | Mail subject/body templates, recipient list (including invite codes), and successful-send history |
+
+The addons **do not make network requests to the guild website**. Transfers to and from the site happen manually through copy and paste. Treat pasted invite codes and SavedVariables backups as **sensitive**; avoid posting populated files or real codes publicly.
+
+## 🧪 Testing and development
+
+The repository includes an **offline Lua 5.1 test harness for RaidSync** at [`tests/raidsync_test.lua`](tests/raidsync_test.lua). From the repository root, with `lua5.1` installed:
+
+```bash
+lua5.1 tests/raidsync_test.lua RaidSync/RaidSync.lua /tmp/raidsync-export.txt
+```
+
+The harness stubs WoW API calls and exercises invitation behavior, role sorting, attendance export, loot capture, trades, and manual corrections. It prints checks and writes a sample loot export to the supplied output path. **It is not a substitute for testing in an actual 3.3.5a client.** No equivalent automated InviteMailer test suite is present in this repository.
+
+## 🛠️ Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| The slash command does nothing | Confirm the correct addon folder and `.toc` are directly inside `Interface/AddOns/`; enable it at character selection; use the intended 3.3.5a client. |
+| RaidSync rejects pasted invites | Paste the **entire** website export, including the `RS1\|INV\|...` header. Loot/roster exports are not invite exports. |
+| RaidSync cannot invite | Ensure you have party/raid leadership permissions. Verify spelling, online availability, open group slots, and the bench checkbox. |
+| An attendance export is empty | RaidSync must have observed raid members during play, and it needs a raid ID from the invite import or Loot tab. |
+| No loot is recorded | Set the raid ID, start **Aufzeichnen**, use **Master Loot**, be the actual master looter, and check the loot-quality threshold. |
+| Recipient or NPC is wrong/missing | Use `/rs an <number> <name>` to correct the recipient. NPC detection is best effort, especially with chests. |
+| InviteMailer won't start | Open a mailbox, check postage money, and check whether everyone in the list is already marked sent. |
+| InviteMailer skips a changed code | It deduplicates by **recipient name**, not by code. Run `/im reset` only when deliberate resending is appropriate. |
+| A mail attempt fails or times out | Review the error, correct the character name, and use **Load failed**; verify uncertain deliveries before retrying. |
+
+## 📁 Repository layout
+
+```text
+.
+├── InviteMailer/
+│   ├── InviteMailer.lua
+│   └── InviteMailer.toc
+├── RaidSync/
+│   ├── RaidSync.lua
+│   └── RaidSync.toc
+├── tests/
+│   └── raidsync_test.lua
+└── README.md
+```
+
+---
+
+Made for guild raid administration on **WoW 3.3.5a**. Contributions and bug reports are welcome via [GitHub Issues](https://github.com/robinschweitz/wow-addons/issues).
