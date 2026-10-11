@@ -115,6 +115,12 @@ check(Core.ItemIDFromLink("|cffa335ee|Hitem:50415:0:0:0:0:0:0:0:80|h[Bryntroll]|
 local p = Core.PatternFromFormat(ERR_DECLINE_GROUP_S)
 check(string.match("Shanna lehnt Eure Gruppeneinladung ab.", p) == "Shanna", "German decline pattern")
 check(Core.NameFromMessage("|Hplayer:Shanna|h[Shanna]|h") == "Shanna", "name from player link")
+local scheduleStart, scheduleEnd = 1793818800, 1793829600
+local scheduled, roster, scheduleErr = Core.ParseInvite("RS2|INV|42|ICC|25|" .. scheduleStart .. "|" .. scheduleEnd .. "\\nTank|TANK|Warrior|0")
+check(scheduleErr == nil and scheduled.startUnix == scheduleStart and scheduled.endUnix == scheduleEnd, "RS2 schedule parsed")
+check(#roster == 1 and roster[1].name == "Tank", "RS2 roster parsed")
+local invalidRaid, invalidMembers, invalidErr = Core.ParseInvite("RS2|INV|42|ICC|25|0|12")
+check(invalidRaid == nil and invalidErr ~= nil, "invalid RS2 timestamps rejected")
 local r, m, err = Core.ParseInvite("RS1|LOOT|1|x|1")
 check(err ~= nil, "loot text rejected as invite")
 
