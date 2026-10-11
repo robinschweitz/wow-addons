@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: RaidSync
+## Notes: Invites the raid roster from the raid website and records master-loot drops for import.
+## Author: klaud
+## Version: 1.0
+## SavedVariables: RaidSyncDB
+
+RaidSync.lua
