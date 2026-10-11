@@ -55,10 +55,16 @@ function Core.ParseInvite(text)
     local lines = Core.Lines(text)
     if #lines == 0 then return nil, nil, "Kein Text eingefügt." end
     local header = Core.Split(lines[1], "|")
-    if #header ~= 5 or header[1] ~= FORMAT or header[2] ~= "INV" or not tonumber(header[3]) then
+    if not ((header[1] == FORMAT and #header == 5) or (header[1] == "RS2" and #header == 7)) or header[2] ~= "INV" or not tonumber(header[3]) then
         return nil, nil, "Das ist kein Einladungs-Export der Website."
     end
     local raid = { id = tonumber(header[3]), name = header[4], size = tonumber(header[5]) }
+    if header[1] == "RS2" then
+        raid.startUnix, raid.endUnix = tonumber(header[6]), tonumber(header[7])
+        if not raid.startUnix or not raid.endUnix or raid.startUnix <= 0 or raid.endUnix <= raid.startUnix then
+            return nil, nil, "Ungültige Kalenderzeiten im Raid-Export."
+        end
+    end
     local members, bad = {}, {}
     for i = 2, #lines do
         local f = Core.Split(lines[i], "|")
@@ -736,6 +742,64 @@ local function Label(parent, text, template)
     return fs
 end
 
+
+local calendarInvites, calendarIndex = nil, 1
+
+local function CreateCalendarEvent()
+    local raid = db.raid
+    if not raid or not raid.startUnix then
+        Print("Kalenderdaten fehlen. Bitte RS2-Export von der Website einlesen.")
+        return
+    end
+    if not (CalendarNewEvent and CalendarEventSetDate and CalendarEventSetTime
+        and CalendarEventSetTitle and CalendarAddEvent and CalendarEventInvite) then
+        Print("WoW-Kalender-API nicht verfügbar.")
+        return
+    end
+    if calendarInvites then Print("Kalendereinladungen laufen bereits.") return end
+    if CalendarIsActionPending and CalendarIsActionPending() then
+        Print("Der Kalender verarbeitet gerade eine Aktion.") return
+    end
+    if CalendarCanAddEvent and not CalendarCanAddEvent() then
+        Print("Kalendereintrag kann nicht erstellt werden.") return
+    end
+    local at = date("*t", raid.startUnix)
+    CalendarNewEvent()
+    CalendarEventSetDate(at.month, at.day, at.year)
+    CalendarEventSetTime(at.hour, at.min)
+    CalendarEventSetTitle(raid.name)
+    if CalendarEventSetDescription then
+        CalendarEventSetDescription("Raid #" .. raid.id .. " | Dauer: " .. math.floor((raid.endUnix - raid.startUnix) / 60) .. " Min.")
+    end
+    if CalendarEventSetType then CalendarEventSetType(0) end
+    -- Protected API: called synchronously from the explicit button click.
+    CalendarAddEvent()
+    calendarInvites, calendarIndex = {}, 1
+    local seen = {}
+    for _, member in ipairs(members) do
+        local key = string.lower(member.name)
+        if not member.bench and not seen[key] and key ~= string.lower(UnitName("player") or "") then
+            table.insert(calendarInvites, member.name)
+            seen[key] = true
+        end
+    end
+    Print("Kalender angelegt; Einladungen folgen nach Freigabe durch den Server.")
+end
+
+local function ContinueCalendarInvites()
+    if not calendarInvites then return end
+    if CalendarIsActionPending and CalendarIsActionPending() then return end
+    if CalendarCanSendInvite and not CalendarCanSendInvite() then return end
+    local name = calendarInvites[calendarIndex]
+    if not name then
+        calendarInvites = nil
+        Print("Kalendereinladungen abgeschlossen.")
+        return
+    end
+    calendarIndex = calendarIndex + 1
+    CalendarEventInvite(name)
+end
+
 local function BuildInvitePanel(panel)
     local hint = Label(panel, "Website: Raid > Aufstellung > 'Einladungen für Addon' kopieren und hier einfügen.", "GameFontHighlightSmall")
     hint:SetPoint("TOPLEFT", 0, 0)
@@ -765,8 +829,11 @@ local function BuildInvitePanel(panel)
     local exportRoster = Button(panel, "Aufstellung exportieren", 150, ExportRoster)
     exportRoster:SetPoint("TOPRIGHT", sort, "BOTTOMRIGHT", 0, -4)
 
-    local listBox, list = MakeScrollEdit(panel, "RaidSyncInviteList", 420, 160, true)
-    listBox:SetPoint("TOPLEFT", bench, "BOTTOMLEFT", 4, -2)
+    local calendarButton = Button(panel, "Kalender einladen", 145, CreateCalendarEvent)
+    calendarButton:SetPoint("TOPLEFT", bench, "BOTTOMLEFT", 4, -4)
+
+    local listBox, list = MakeScrollEdit(panel, "RaidSyncInviteList", 420, 132, true)
+    listBox:SetPoint("TOPLEFT", calendarButton, "BOTTOMLEFT", 0, -4)
     UI.inviteList = list
 
     local status = Label(panel, "", "GameFontHighlightSmall")
@@ -935,6 +1002,8 @@ end
 
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
+events:RegisterEvent("CALENDAR_ACTION_PENDING")
+events:RegisterEvent("CALENDAR_UPDATE_EVENT")
 events:RegisterEvent("CHAT_MSG_SYSTEM")
 events:RegisterEvent("CHAT_MSG_LOOT")
 events:RegisterEvent("RAID_ROSTER_UPDATE")
@@ -969,6 +1038,8 @@ events:SetScript("OnEvent", function(self, event, ...)
         hooksecurefunc("GiveMasterLoot", OnMasterLootGiven)
     elseif not db then
         return
+    elseif event == "CALENDAR_ACTION_PENDING" or event == "CALENDAR_UPDATE_EVENT" then
+        ContinueCalendarInvites()
     elseif event == "CHAT_MSG_SYSTEM" then
         OnSystemMessage(...)
     elseif event == "CHAT_MSG_LOOT" then
