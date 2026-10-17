@@ -162,7 +162,7 @@ end
 ---------------------------------------------------------------------------
 local Ledger = ns.Ledger
 local panel = CreateFrame("Frame", "RaidLedgerRaidPanel", Ledger)
-panel:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 16, -68)
+panel:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 16, -48)
 panel:SetWidth(568)
 panel:SetHeight(332)
 ns.makeBackdrop(panel, 0.035, 0.070, 0.105, 0.97)

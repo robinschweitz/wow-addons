@@ -8,7 +8,7 @@ Purpose-built **World of Warcraft: Wrath of the Lich King (3.3.5a)** addons for 
 
 | Addon | Who uses it | What it does | Open it |
 | --- | --- | --- | --- |
-| **[RaidLedger](#-raidledger)** | Raid lead / master looter | Invites the website's raid list, sorts groups by role, exports attendance, runs the loot rolls (main/off spec, enhanced EP rolls, fewest-items-first), records awards, trades, parked, disenchanted and guild-bank items, and exports the loot for the website. | `/ledger`, or **RAID** / **EXPORT** in its window |
+| **[RaidLedger](#-raidledger)** | Raid lead / master looter | Invites the website's raid list, sorts groups by role, exports attendance, runs the loot rolls (main/off spec, enhanced EP rolls, fewest-items-first, passes and roll corrections, free BoE rolls), records awards, trades, parked, disenchanted and guild-bank items, and exports the loot for the website. | `/ledger`, or **RAID** / **EXPORT** in its window |
 | **[RaidWishlist](#-raidwishlist)** | Raid members | Imports the member's wishlist from the website, prompts (or rolls automatically) when a wished item is rolled, shows open items and who got what, and shares the wishlist with the raid lead. | `/wish` or the minimap button |
 | **[InviteMailer](#%EF%B8%8F-invitemailer)** | Officers | Sends personalized in-game letters containing individual invite codes. | `/im` |
 
@@ -78,6 +78,9 @@ Latejoin;PALADIN;1760001200
 
 - Select an item in the master-loot window and `/ledger start`: a 30-second raid roll. `/rnd 100` is **main spec**, `/rnd 99` **off spec**, an enhanced main-spec roll is **1+X to 100+X** with X = min(EP, 50). Main spec beats off spec; within a spec the player with the **fewest items this raid** wins, then the roll. Tokens have their own tally. Ties get a 15-second tie-break.
 - **GIVE + RECORD** hands the item out through master loot; items you keep for later are followed through your trades. **PARK** leaves an item with a raider until it is rolled (unique items). **DE** and **BANK** send unwanted items to the enchanter or the guild bank character; they count for nobody.
+- Under the items the window lists the selected item's rolls. **Right-click a roll** to take a pass (the next-best roll wins) or to count it differently: main spec, off spec, not at all, or an enhanced roll with corrected points (110 from 21-120 with 10 instead of 20 EP becomes 100 from 11-110). This also works in a given-out award's roll log: the award then moves to the new winner.
+- The four buttons under the award button show the rollers, winner first; **ALL (n)** opens the whole raid by group to pick any recipient.
+- A bind-on-equip item nobody rolls on can be posted again as a **free BoE roll** for any character (`/rnd 100`, highest wins, counts for nobody).
 - Every award is announced to the raid and shared with other ledger users and the members' wishlist addons. Raiders' shared wishlists show as **WL n** on each drop and `[WL #rank]` on rollers.
 - Click an award to see its rolls or change the recipient; `/ledger del <#>` removes one (the export keeps it as deleted).
 
@@ -167,6 +170,8 @@ Each recipient gets the **same template**, with only their own name and code sub
 | `/ledger groups` | Sort raid groups: tanks, healers, the rest |
 | `/ledger attendance` | Export who was in the raid |
 | `/ledger start` | Start a 30-second roll for the selected item |
+| `/ledger pass <name>` · `/ledger count <name> ms\|os\|none\|enh <0-50>` | Take a pass or change how a roll counts (selected item or shown award) |
+| `/ledger free` | Post the selected item again as a free BoE roll |
 | `/ledger set <#> [name]` | Change the recipient of award # (without a name: your target) |
 | `/ledger del <#>` | Remove award # (exported as deleted) |
 | `/ledger tally` | Items per player this raid |

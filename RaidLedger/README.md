@@ -48,8 +48,11 @@ read: export the list again on the website.
 ## Rolls
 
 Opening a loot window lists every item at or above the group's loot threshold.
-Select an item and type `/ledger start` to start a 30-second roll. The raid's
-rules:
+Select an item and type `/ledger start` to start a 30-second roll. Change the
+length with `/ledger timer <seconds> [tie-break seconds]` (roll 10-300 s,
+tie-break 5-120 s, default 30/15; `/ledger timer reset`), saved across `/reload`
+and new raids. A running roll keeps its time. The raid is reminded when half and
+a quarter of the time are left (30 s: at 15 and 8 seconds). The raid's rules:
 
 - `/rnd 100` (1-100) is **main spec**, `/rnd 99` (1-99) is **off spec**.
 - EP enhance a main-spec roll to 1+X..100+X with X = min(EP, 50), the guild
@@ -67,6 +70,53 @@ rules:
 
 Announcements go to raid, then party, then local chat:
 "[item] won by Bob (87) - main spec 21-120, 0 items so far."
+
+### The roll list
+
+Under the loot items, the left pane lists the selected item's rolls in winning
+order: name, spec (`MS`, `MS 21-120`, `OS`, `BoE`) and the roll, the winner
+marked, and ignored or passed rolls in grey with the reason. The mouse wheel
+scrolls a long list; the items stay in place. Click a roll to make its player
+the recipient.
+
+### Picking the recipient
+
+The four buttons under the award button show the selected item's rollers in
+winning order with their roll (winner first), then the rest of the group.
+**ALL (n)** opens every raid member, one column per raid group, in class
+colors; click a name to make them the recipient.
+
+### Passes and corrections
+
+Only the master looter changes rolls. Right-click a roll in the roll list for:
+
+- **PASS**: the player does not need the item after all. The roll is struck
+  ("[item] - Bob passes."). Once a winner was announced, the next-best roll
+  wins and is announced; after a tie-break the other tied player comes first,
+  then the earlier rolls. With nobody left: "no valid rolls".
+- **MAIN SPEC**, **OFF SPEC**, **DOES NOT COUNT**: count the roll differently.
+  Main spec takes the points off an enhanced roll (110 from 21-120 counts 90).
+- **ENHANCED ...**: correct the points of an enhanced roll. Someone rolled as
+  with 20 EP but had 10: 110 from 21-120 becomes 100 from 11-110. 0 points is
+  a plain main-spec roll.
+
+Every change is announced ("[item] - Bob's roll counts as main spec 11-110
+(100)."), and the roll log keeps what was really rolled. The same commands:
+`/ledger pass <name>` and `/ledger count <name> ms|os|none|enh <0-50>`.
+
+The same right-click works in a given-out award's roll log (click the award
+first). If someone else now wins, the award goes to them like a recipient
+change: announced with "(corrected)", the tally moves, and the old winner
+trades the item over. With nobody valid left, or a tie, the award stays and
+the ledger asks you to decide (DE, BANK or another recipient).
+
+### Free BoE roll
+
+When a roll on a bind-on-equip item ends without valid rolls, a popup offers
+to post it again **NOW** as a free roll for any character (**LATER**: select
+it and `/ledger free`). Only `/rnd 100` counts, the highest roll wins, the
+award counts in nobody's tally and is exported with spec `boe`. A free roll
+takes passes, but no spec changes.
 
 ## Awards
 
@@ -159,7 +209,7 @@ Items do not have to be rolled right away:
 ## Disenchant and guild bank
 
 Items nobody wants go to **DE** (disenchant) or **BANK** (guild bank), the
-small buttons next to "click a group member". The item goes to the name in the
+small buttons next to **ALL**. The item goes to the name in the
 recipient box (the enchanter or the bank character), or stays with you when
 the box is empty. The award counts for nobody, is announced to the raid
 ("... will be disenchanted (Bob)."), and appears in the export as
@@ -193,6 +243,9 @@ Click an award in the list, pick or type the recipient and press
 | `/ledger set <#>` | Change it to your current player target |
 | `/ledger del <#>` | Remove award `#` (kept in the export as `deleted`) |
 | `/ledger spec <#> ms\|os\|none` | Count award `#` for main spec, off spec or no tally |
+| `/ledger pass <name>` | The player passes on the selected item (or the shown award) |
+| `/ledger count <name> ms\|os\|none\|enh <0-50>` | Change how that player's roll counts |
+| `/ledger free` | Post the selected item again as a free BoE roll |
 | `/ledger tally` | Items per player this raid |
 | `/ledger sync` | Ask the group's ledgers for this raid's awards |
 
@@ -213,7 +266,7 @@ RS2;LOOT;42;Raidleader;1760000000;1760003600
 ```
 
 Header: `RS2;LOOT;<raid ID>;<recorder>;<first award time>;<export time>`.
-Lines, oldest first: `<award ID>;<time>;<creature ID or ->;<item ID or ->;<recipient>;<state>;<roll or ->;<ms|os|->;<roll range or ->;<roll winner or ->`.
+Lines, oldest first: `<award ID>;<time>;<creature ID or ->;<item ID or ->;<recipient>;<state>;<roll or ->;<ms|os|boe|->;<roll range or ->;<roll winner or ->`.
 The roll is the recipient's (or, for a held item, the winner's); a range such
 as `21-120` shows an enhanced main-spec roll (X = 20). The winner tells the
 website who a held item goes to. The website (raid-website, ADR 070) previews
