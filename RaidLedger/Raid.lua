@@ -3,7 +3,8 @@
 -- role, and export who was really in the raid for the website's roster import.
 -- Text formats, ";"-separated like every RaidLedger export (a WoW edit box
 -- treats "|" as the start of an escape sequence):
---   invite list (website -> addon): RS2;INV;<raidID>;<raidName>;<size>
+--   invite list (website -> addon): RS2;INV;<raidID>;<raidName>;<size>[;<YYYY-MM-DD>;<HH:MM>]
+--                                   (date and start in realm time, for the calendar event)
 --                                   <name>;<TANK|HEAL|DD>;<class>;<bench 0/1>
 --   attendance (addon -> website):  RS2;ROSTER;<raidID>;<recorder>;<exportUnix>
 --                                   <name>;<classToken or ->;<firstSeenUnix>
@@ -27,6 +28,8 @@ local STATUS_COLORS = {
 local ROLE_LABELS = { TANK = "Tank", HEAL = "Heal", DD = "DD" }
 local ROLE_ORDER = { TANK = 1, HEAL = 2, DD = 3 }
 
+local CALENDAR_MAX_INVITES = 100   -- the client's limit per event, the creator included
+local CALENDAR_TITLE_BYTES = 31
 local MAX_CONVERT_TRIES = 3  -- a party below level 10 cannot become a raid
 local queue, inviting, inviteDelay = {}, false, 0
 local convertTries, convertFailed = 0, false
@@ -64,10 +67,20 @@ local function parseInvite(text)
     end
     if table.getn(lines) == 0 then return nil, L["Paste the website's invite list first."] end
     local header = split(lines[1], ";")
-    if table.getn(header) ~= 5 or header[1] ~= FORMAT or header[2] ~= "INV" or not tonumber(header[3]) then
+    local fields = table.getn(header)
+    if (fields ~= 5 and fields ~= 7) or header[1] ~= FORMAT or header[2] ~= "INV" or not tonumber(header[3]) then
         return nil, L["That is not the website's invite list."]
     end
     local raid = { id = tonumber(header[3]), name = header[4], size = tonumber(header[5]) }
+    if fields == 7 then
+        local year, month, day = string.match(header[6], "^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+        local hour, minute = string.match(header[7], "^(%d%d?):(%d%d)$")
+        year, month, day, hour, minute = tonumber(year), tonumber(month), tonumber(day), tonumber(hour), tonumber(minute)
+        if not (year and hour and month >= 1 and month <= 12 and day >= 1 and day <= 31 and hour <= 23 and minute <= 59) then
+            return nil, L["The invite list's date or time is not valid (YYYY-MM-DD;HH:MM)."]
+        end
+        raid.year, raid.month, raid.day, raid.hour, raid.minute = year, month, day, hour, minute
+    end
     local members, bad = {}, {}
     for i = 2, table.getn(lines) do
         local f = split(lines[i], ";")
@@ -208,6 +221,16 @@ local function textArea(name, top, height)
         self:SetVerticalScroll(math.max(0, math.min(range, self:GetVerticalScroll() - delta * 28)))
     end)
     edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    -- A multi-line edit box is only as tall as its text: the whole area takes
+    -- the click, so typing works wherever the field is clicked.
+    local function focus()
+        edit:SetFocus()
+        edit:SetCursorPosition(string.len(edit:GetText() or ""))
+    end
+    back:EnableMouse(true)
+    back:SetScript("OnMouseDown", focus)
+    scroll:EnableMouse(true)
+    scroll:SetScript("OnMouseDown", focus)
     return edit
 end
 
@@ -222,6 +245,11 @@ retryButton:SetPoint("LEFT", inviteButton, "RIGHT", 6, 0)
 local benchButton = ns.flatButton(panel, L["BENCH: NO"], 140)
 benchButton:SetHeight(20)
 benchButton:SetPoint("TOPLEFT", readButton, "BOTTOMLEFT", 0, -6)
+-- A real frame name: key bindings (CLICK RaidLedgerCalendar:LeftButton) find
+-- the button by it, and CalendarAddEvent needs such a hardware click.
+local calendarButton = ns.flatButton(panel, L["CALENDAR EVENT"], 154, "RaidLedgerCalendar")
+calendarButton:SetHeight(20)
+calendarButton:SetPoint("LEFT", benchButton, "RIGHT", 6, 0)
 
 local attendanceHeading = ns.label(panel, "GameFontNormal", 10, {1.00, 0.80, 0.32})
 attendanceHeading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -212)
@@ -489,6 +517,166 @@ local function sortGroups()
 end
 
 ---------------------------------------------------------------------------
+-- Calendar event (raider feedback 2026-10-18): the website's invite list
+-- carries the raid's date and start; CALENDAR EVENT creates the raid event in
+-- the game calendar and invites everyone on the list (the bench too: they
+-- signed up).
+---------------------------------------------------------------------------
+local function calendarTitle(name)
+    local title = ns.trim(name or "")
+    if title == "" then title = "Raid" end
+    if string.len(title) <= CALENDAR_TITLE_BYTES then return title end
+    title = string.sub(title, 1, CALENDAR_TITLE_BYTES)
+    -- Do not cut a UTF-8 character (umlauts) in half.
+    while string.len(title) > 0 do
+        local last = string.byte(title, string.len(title))
+        if last < 128 then break end
+        title = string.sub(title, 1, string.len(title) - 1)
+        if last >= 192 then break end      -- dropped a lead byte: the character is gone
+    end
+    return title
+end
+
+local function dateKey(year, month, day, hour, minute)
+    return (((year * 100 + month) * 100 + day) * 100 + hour) * 100 + minute
+end
+
+-- The server resolves each invite of a new event (name -> character) before
+-- the client lists it, so invites go out one at a time. Once all are listed
+-- (or a few seconds after the last answer) the button reads CREATE EVENT: the
+-- client adds an event only from a real click or key press (live run
+-- 08455f4dff39: ADDON_ACTION_BLOCKED from a timer).
+-- The check afterwards polls: CalendarSetAbsMonth itself fires
+-- CALENDAR_UPDATE_EVENT_LIST, so reading the list on that event recursed.
+local CALENDAR_INVITE_DELAY = 0.25
+local CALENDAR_SETTLE = 6
+local CALENDAR_CONFIRM = 20   -- seconds to wait for the event in the server's calendar
+local calendarJob    -- { names, next, before, lastAt, wait, title, when, left }
+local calendarCheck  -- the added event, until it shows up in the calendar
+
+-- confirmCalendarEvent looks for the added event in the calendar the server
+-- sent back, and saves the result (setup.calendar) for the raid lead.
+local function countMatches(event)
+    CalendarSetAbsMonth(event.month, event.year)
+    local count = 0
+    for i = 1, CalendarGetNumDayEvents(0, event.day) or 0 do
+        local title, hour, minute = CalendarGetDayEvent(0, event.day, i)
+        if title == event.title and hour == event.hour and minute == event.minute then count = count + 1 end
+    end
+    return count
+end
+
+-- An older event with the same title and time does not count: one more
+-- than before the add must show up.
+local function confirmCalendarEvent()
+    local check = calendarCheck
+    if not check then return end
+    if countMatches(check) > check.before then
+        calendarCheck = nil
+        setup().calendar = { raid = check.raid, title = check.title, confirmed = true, invites = check.invites }
+        ns.say(L["The calendar event is in the calendar: confirmed by the server."])
+        return
+    end
+    if GetTime() >= check.deadline then
+        calendarCheck = nil
+        setup().calendar = { raid = check.raid, title = check.title, confirmed = false, invites = check.invites }
+        ns.say(L["The calendar event did not show up in the calendar; check it with the calendar button."])
+    end
+end
+
+local function setCalendarButton(text)
+    calendarButton:SetText(text or L["CALENDAR EVENT"])
+end
+
+local function finishCalendarEvent()
+    local job = calendarJob
+    calendarJob = nil
+    setCalendarButton()
+    local added = math.max(0, (CalendarEventGetNumInvites() or 0) - job.before)
+    local before = countMatches(job)
+    CalendarAddEvent()
+    calendarCheck = { before = before, raid = job.raid, title = job.title, year = job.year, month = job.month, day = job.day,
+        hour = job.hour, minute = job.minute, invites = added, deadline = GetTime() + CALENDAR_CONFIRM, nextAt = GetTime() + 1 }
+    OpenCalendar()      -- asks the server for the calendar, with the new event
+    ns.say(string.format(L["Calendar event \"%s\" on %s created with %d invites."], job.title, job.when, added))
+    local missing = table.getn(job.names) - added
+    if missing > 0 then ns.say(string.format(L["%d characters could not be invited (not found?)."], missing)) end
+    if job.left > 0 then ns.say(string.format(L["%d characters not invited: the calendar takes 100 per event."], job.left)) end
+end
+
+local function calendarStep(elapsed)
+    if calendarCheck and GetTime() >= calendarCheck.nextAt then
+        calendarCheck.nextAt = GetTime() + 1
+        confirmCalendarEvent()
+    end
+    local job = calendarJob
+    if not job then return end
+    job.wait = job.wait - elapsed
+    if job.wait > 0 then return end
+    if job.next <= table.getn(job.names) then
+        CalendarEventInvite(job.names[job.next])
+        job.next, job.wait, job.lastAt = job.next + 1, CALENDAR_INVITE_DELAY, GetTime()
+        return
+    end
+    if job.ready then return end
+    local listed = (CalendarEventGetNumInvites() or 0) - job.before
+    if listed >= table.getn(job.names) or GetTime() - job.lastAt >= CALENDAR_SETTLE then
+        job.ready = true
+        setCalendarButton(string.format(L["CREATE EVENT (%d)"], math.max(0, listed)))
+        ns.say(string.format(L["%d invites ready: click CREATE EVENT (or /ledger calendar again) to add the event."], math.max(0, listed)))
+    else
+        job.wait = 0.2
+    end
+end
+
+local function createCalendarEvent()
+    if calendarJob and calendarJob.ready then
+        finishCalendarEvent()       -- this click or slash command is the key press the client wants
+        return
+    end
+    if calendarJob then
+        ns.say(L["The calendar event is still being created."])
+        return
+    end
+    local data = setup()
+    local raid = data.raid
+    if not raid or table.getn(data.members) == 0 then
+        ns.say(L["Read the website's invite list first."])
+        return
+    end
+    if not raid.year then
+        ns.say(L["This invite list has no date: export it again on the website."])
+        return
+    end
+    local _, month, day, year = CalendarGetDate()
+    local hour, minute = GetGameTime()
+    if dateKey(raid.year, raid.month, raid.day, raid.hour, raid.minute) <= dateKey(year, month, day, hour, minute) then
+        ns.say(string.format(L["The raid on %s is already over; the calendar only takes future events."],
+            string.format("%02d.%02d.%04d %02d:%02d", raid.day, raid.month, raid.year, raid.hour, raid.minute)))
+        return
+    end
+    local title = calendarTitle(raid.name)
+    OpenCalendar()      -- the calendar as it is, to tell the new event from older ones
+    CalendarCloseEvent()
+    CalendarNewEvent()
+    CalendarEventSetType(CALENDAR_EVENTTYPE_RAID)
+    CalendarEventSetTitle(title)
+    CalendarEventSetDescription(string.format(L["Raid #%d - invites from RaidLedger"], raid.id))
+    CalendarEventSetDate(raid.month, raid.day, raid.year)
+    CalendarEventSetTime(raid.hour, raid.minute)
+    local me, names, left = ns.lower(ns.playerName()), {}, 0
+    for _, member in ipairs(data.members) do
+        if ns.lower(member.name) ~= me then
+            if table.getn(names) < CALENDAR_MAX_INVITES - 1 then table.insert(names, member.name) else left = left + 1 end
+        end
+    end
+    calendarJob = { names = names, next = 1, before = CalendarEventGetNumInvites() or 0, lastAt = GetTime(), wait = 0,
+        title = title, when = string.format("%02d.%02d. %02d:%02d", raid.day, raid.month, raid.hour, raid.minute), left = left,
+        raid = raid.id, year = raid.year, month = raid.month, day = raid.day, hour = raid.hour, minute = raid.minute }
+    ns.say(string.format(L["Creating the calendar event: inviting %d characters..."], table.getn(names)))
+end
+
+---------------------------------------------------------------------------
 -- Buttons, events, commands
 ---------------------------------------------------------------------------
 local function showPanel(show)
@@ -519,6 +707,7 @@ benchButton:SetScript("OnClick", function()
 end)
 attendanceButton:SetScript("OnClick", exportAttendance)
 sortButton:SetScript("OnClick", sortGroups)
+calendarButton:SetScript("OnClick", createCalendarEvent)
 
 -- System messages tell what became of an invite.
 local function buildPatterns()
@@ -566,6 +755,7 @@ events:SetScript("OnEvent", function(_, event, ...)
             ForgeTestBridge:RegisterFrame("RaidLedgerInviteText", inviteText)
             ForgeTestBridge:RegisterFrame("RaidLedgerRead", readButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerInviteAll", inviteButton)
+            ForgeTestBridge:RegisterFrame("RaidLedgerCalendar", calendarButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerAttendance", attendanceButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerRosterText", rosterText)
             ForgeTestBridge:RegisterFrame("RaidLedgerRaidStatus", listHeading)
@@ -573,11 +763,13 @@ events:SetScript("OnEvent", function(_, event, ...)
         end
     elseif event == "CHAT_MSG_SYSTEM" then
         onSystemMessage(...)
+
     else
         updateGroupStatus()
     end
 end)
 events:SetScript("OnUpdate", function(_, elapsed)
+    calendarStep(elapsed)
     if not inviting then return end
     inviteDelay = inviteDelay - elapsed
     if inviteDelay <= 0 then inviteStep() end
@@ -586,6 +778,7 @@ end)
 ns.commands.setup = function() showPanel(true) end
 ns.commands.invite = function(rest) startInvites(ns.lower(rest) == "missing") end
 ns.commands.groups = sortGroups
+ns.commands.calendar = function() createCalendarEvent() end
 ns.commands.attendance = function()
     showPanel(true)
     exportAttendance()
@@ -593,4 +786,5 @@ end
 table.insert(ns.help, L["/ledger setup - invites, groups and attendance (RAID button)"])
 table.insert(ns.help, L["/ledger invite [missing] - invite the website's list (or retry the missing)"])
 table.insert(ns.help, L["/ledger groups - sort raid groups: tanks, healers, the rest"])
+table.insert(ns.help, L["/ledger calendar - calendar raid event from the invite list, everyone on it invited"])
 table.insert(ns.help, L["/ledger attendance - export who was in the raid for the website"])

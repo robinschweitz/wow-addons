@@ -10,6 +10,8 @@ if GetLocale() ~= "deDE" then return end
 -- Window
 L["EXPORT"] = "EXPORT"
 L["MASTER LOOT ITEMS"] = "BEUTE DES PLÜNDERMEISTERS"
+L["MASTER LOOT ITEMS  (%d OPEN)"] = "BEUTE DES PLÜNDERMEISTERS  (%d OFFEN)"
+L["with %s"] = "bei %s"
 L["Open the master loot window\nPlayers can then use /rnd"] = "Beutefenster als Plündermeister öffnen\nDann können alle /rnd würfeln"
 L["AWARD SELECTED LOOT"] = "AUSWAHL VERGEBEN"
 L["Select an active roll"] = "Einen Gegenstand auswählen"
@@ -256,3 +258,45 @@ L["/ledger groups - sort raid groups: tanks, healers, the rest"] = "/ledger grou
 L["/ledger attendance - export who was in the raid for the website"] = "/ledger attendance - Teilnahme für die Webseite exportieren"
 L["The group did not become a raid: everyone must be level 10 or higher."] =
     "Die Gruppe wurde kein Schlachtzug: alle müssen mindestens Stufe 10 sein."
+
+-- Minimap button
+L["Click: open or close the ledger"] = "Klick: Ledger öffnen oder schließen"
+L["Drag: move this button"] = "Ziehen: Knopf verschieben"
+L["usage: /ledger minimap on|off"] = "Aufruf: /ledger minimap on|off"
+L["minimap button shown."] = "Minimap-Knopf wird angezeigt."
+L["minimap button hidden; /ledger minimap on brings it back."] = "Minimap-Knopf ausgeblendet; /ledger minimap on holt ihn zurück."
+L["/ledger minimap on|off - show or hide the minimap button"] = "/ledger minimap on|off - Minimap-Knopf zeigen oder verbergen"
+
+-- Rolls on items in the bags
+L["usage: /ledger roll <item link> (or Alt+click the item in your bags)"] =
+    "Aufruf: /ledger roll <Itemlink> (oder das Item in den Taschen mit Alt+Klick)"
+L["only the master looter or the raid lead can start rolls."] = "nur der Plündermeister oder die Raidleitung kann Würfe starten."
+L["%s is already being rolled."] = "Auf %s wird schon gewürfelt."
+L["item %s is not in your bags."] = "Item %s ist nicht in deinen Taschen."
+L["/ledger roll <item link or ID> - roll an item from your bags (or Alt+click it in your bags)"] =
+    "/ledger roll <Itemlink oder ID> - auf ein Item aus deinen Taschen würfeln lassen (oder Alt+Klick in den Taschen)"
+
+-- Calendar event from the invite list
+L["CALENDAR EVENT"] = "KALENDER-TERMIN"
+L["The invite list's date or time is not valid (YYYY-MM-DD;HH:MM)."] =
+    "Datum oder Uhrzeit der Einladungsliste ist ungültig (JJJJ-MM-TT;HH:MM)."
+L["This invite list has no date: export it again on the website."] =
+    "Diese Einladungsliste hat kein Datum: bitte auf der Webseite neu exportieren."
+L["The raid on %s is already over; the calendar only takes future events."] =
+    "Der Raid am %s ist schon vorbei; der Kalender nimmt nur künftige Termine."
+L["CREATE EVENT (%d)"] = "TERMIN ERSTELLEN (%d)"
+L["%d invites ready: click CREATE EVENT (or /ledger calendar again) to add the event."] =
+    "%d Einladungen bereit: TERMIN ERSTELLEN klicken (oder nochmal /ledger calendar), um den Termin anzulegen."
+L["The calendar event is still being created."] = "Der Kalender-Termin wird gerade erstellt."
+L["Creating the calendar event: inviting %d characters..."] = "Erstelle den Kalender-Termin: lade %d Charaktere ein..."
+L["%d characters could not be invited (not found?)."] = "%d Charaktere konnten nicht eingeladen werden (nicht gefunden?)."
+L["The calendar event is in the calendar: confirmed by the server."] =
+    "Der Kalender-Termin steht im Kalender: vom Server bestätigt."
+L["The calendar event did not show up in the calendar; check it with the calendar button."] =
+    "Der Kalender-Termin ist nicht im Kalender aufgetaucht; bitte im Kalender nachsehen."
+L["Raid #%d - invites from RaidLedger"] = "Raid #%d - Einladungen von RaidLedger"
+L["Calendar event \"%s\" on %s created with %d invites."] = "Kalender-Termin \"%s\" am %s mit %d Einladungen erstellt."
+L["%d characters not invited: the calendar takes 100 per event."] =
+    "%d Charaktere nicht eingeladen: der Kalender nimmt 100 pro Termin."
+L["/ledger calendar - calendar raid event from the invite list, everyone on it invited"] =
+    "/ledger calendar - Kalender-Raidtermin aus der Einladungsliste, alle darauf eingeladen"

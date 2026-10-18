@@ -509,8 +509,8 @@ local function label(parent, template, size, color)
     return text
 end
 
-local function flatButton(parent, caption, width)
-    local button = CreateFrame("Button", nil, parent)
+local function flatButton(parent, caption, width, name)
+    local button = CreateFrame("Button", name, parent)
     button:SetWidth(width)
     button:SetHeight(24)
     makeBackdrop(button, 0.08, 0.25, 0.34, 0.98)
@@ -1133,7 +1133,9 @@ local function showRollLog(record)
     local winner = log and winningRoll(log)
     for i = 1, MAX_ACTIVE do
         local row, r = rows[i], log and log[i + rollOffset]
-        row.item = nil
+        row.item, row.record = nil, nil
+        row.holder:SetText("")
+        row.text:SetPoint("RIGHT", row, "RIGHT", -86, 0)
         row.logName, row.fullName = r and r.name, r and r.name
         row.rollRef = r and r.kind and not r.note and r or nil
         if r then
@@ -1173,31 +1175,59 @@ local function showRollLog(record)
     end
 end
 
+-- openRecords: awards still to be rolled (parked, or kept without a roll),
+-- oldest first, except those whose later roll is already in the roll list.
+local function openRecords()
+    local rolling, list = {}, {}
+    for _, entry in ipairs(active) do
+        if entry.later and entry.record then rolling[entry.record] = true end
+    end
+    local history = ensureDatabase().history
+    for i = table.getn(history), 1, -1 do
+        local record = history[i]
+        if isOpenAward(record) and not rolling[record] then table.insert(list, record) end
+    end
+    return list
+end
+
 local function updateRows()
-    if editing then
+    -- An open award has no roll log: it stays selected in the loot list.
+    if editing and not isOpenAward(editing) then
         showRollLog(editing)
         updateSelection()
         updateRoster()
         updateHistory()
         return
     end
-    rollHeading:SetText(L["MASTER LOOT ITEMS"])
+    -- Open awards still have to be rolled: they stay in the loot list, after
+    -- the loot, marked OPEN, so the master looter cannot overlook them.
+    local open = openRecords()
+    rollHeading:SetText(table.getn(open) > 0 and string.format(L["MASTER LOOT ITEMS  (%d OPEN)"], table.getn(open))
+        or L["MASTER LOOT ITEMS"])
     emptyRolls:SetText(EMPTY_ACTIVE)
     -- Under the items: the selected item's rolls (left-click picks the
     -- recipient, right-click passes or recounts), scrolled by the mouse wheel.
     local current = selectedEntry()
     local log = current and sortedRollLog(current) or {}
-    local items = math.min(table.getn(active), MAX_ACTIVE)
-    local room = MAX_ACTIVE - items - 1
     local count = table.getn(log)
+    local loot = math.min(table.getn(active), MAX_ACTIVE)
+    -- Open items give way to the selected roll's log (up to four lines); the
+    -- heading still counts them all.
+    local openRoom = MAX_ACTIVE - loot
+    if count > 0 then openRoom = math.max(0, openRoom - 1 - math.min(count, 4)) end
+    local items = loot + math.min(table.getn(open), openRoom)
+    local room = MAX_ACTIVE - items - 1
     if count == 0 or room < 1 then room = 0 end
     rollOffset = math.max(0, math.min(rollOffset, count - room))
     local winner = current and current.winner and winningRoll(log)
     local activeCount = 0
     for i = 1, MAX_ACTIVE do
-        local entry = i <= items and active[i]
+        local entry = i <= loot and active[i]
+        local record = not entry and i <= items and open[i - loot]
         local row = rows[i]
-        row.logName, row.fullName, row.rollRef = nil, nil, nil
+        row.logName, row.fullName, row.rollRef, row.record = nil, nil, nil, nil
+        row.holder:SetText("")
+        row.text:SetPoint("RIGHT", row, "RIGHT", -86, 0)
         row:GetFontString():SetTextColor(0.82, 0.91, 0.96)
         row:SetBackdropBorderColor(0.20, 0.63, 0.82, 0.92)
         if room > 0 and i == items + 1 then
@@ -1236,6 +1266,24 @@ local function updateRows()
             local isSelected = selected == entry
             row:SetBackdropColor(isSelected and 0.10 or 0.045, isSelected and 0.21 or 0.09, isSelected and 0.29 or 0.13, 0.98)
             row:Show()
+        elseif record then
+            activeCount = activeCount + 1
+            row.item, row.logName, row.record = nil, nil, record
+            local color = stateColors.parked
+            row:SetText(record.item)
+            row.count:SetText(L["OPEN"])
+            row.count:SetTextColor(color[1], color[2], color[3])
+            local wished = table.getn(wishersOf(record.itemID))
+            row.wish:SetText(knowsWishlists() and string.format(L["WL %d"], wished) or "")
+            row.holder:SetText(string.format(L["with %s"], record.recipient or ""))
+            row.holder:ClearAllPoints()
+            row.holder:SetPoint("RIGHT", row, "RIGHT", knowsWishlists() and -86 or -52, 0)
+            row.text:SetPoint("RIGHT", row.holder, "LEFT", -6, 0)
+            if wished > 0 then row.wish:SetTextColor(0.45, 0.85, 0.55) else row.wish:SetTextColor(0.50, 0.50, 0.50) end
+            local isSelected = editing == record
+            row:SetBackdropColor(isSelected and 0.10 or 0.045, isSelected and 0.21 or 0.09, isSelected and 0.29 or 0.13, 0.98)
+            row:SetBackdropBorderColor(color[1], color[2], color[3], 0.80)
+            row:Show()
         else
             row.item = nil
             row:Hide()
@@ -1265,10 +1313,20 @@ for i = 1, MAX_ACTIVE do
     row.count:SetPoint("RIGHT", row, "RIGHT", -7, 0)
     row.wish = label(row, "GameFontNormalSmall", 9, {0.45, 0.85, 0.55})
     row.wish:SetPoint("RIGHT", row, "RIGHT", -52, 0)
+    -- Who holds an open item: its own column, so a long item name is cut, not the name.
+    row.holder = label(row, "GameFontNormalSmall", 9, {0.85, 0.62, 1.00})
+    row.holder:SetPoint("RIGHT", row, "RIGHT", -52, 0)
+    row.text = rowText
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     row:SetScript("OnClick", function(self, which)
         if which == "RightButton" then
             if self.rollRef then roster.openMenu(self) end
+            return
+        end
+        if self.record then     -- an open award: select it, PARK reads ROLL
+            editing, selected, rollOffset = self.record, nil, 0
+            recipientBox:SetText(self.record.recipient or "")
+            updateRows()
             return
         end
         if not self.item then   -- a roll line: its player becomes the recipient
@@ -2299,6 +2357,80 @@ local function startLaterRoll(record)
     startSelectedRoll()
 end
 
+-- Rolls on items in the bags (raider feedback 2026-10-18): Alt+click a bag
+-- item, or /ledger roll <item link>. The item is in the roller's bags, so it
+-- is an award held by them: an open one for that item is rolled, otherwise a
+-- new held award is recorded first. The roll then runs like any later roll,
+-- and the winner gets the item by trade.
+local function mayStartRolls()
+    local raid, party = GetNumRaidMembers() or 0, GetNumPartyMembers() or 0
+    if raid == 0 and party == 0 then return true end
+    local method, partyMaster, raidMaster = GetLootMethod()
+    if method == "master" then
+        if raid > 0 and raidMaster and isPlayer(UnitName("raid" .. raidMaster)) then return true end
+        if raid == 0 and partyMaster == 0 then return true end
+    end
+    if raid > 0 then return (IsRaidLeader() or IsRaidOfficer()) and true or false end
+    return IsPartyLeader() and true or false
+end
+
+-- bagLink finds an item ID's link in the bags (for /ledger roll <itemID>).
+local function bagLink(itemID)
+    for bag = 0, NUM_BAG_SLOTS or 4 do
+        for slot = 1, GetContainerNumSlots(bag) or 0 do
+            local link = GetContainerItemLink(bag, slot)
+            if itemIDFromLink(link) == itemID then return link end
+        end
+    end
+end
+
+local function rollBagItem(link)
+    link = trim(link)
+    if string.match(link, "^%d+$") then
+        local found = bagLink(tonumber(link))
+        if not found then
+            say(string.format(L["item %s is not in your bags."], link))
+            return
+        end
+        link = found
+    end
+    local itemID = itemIDFromLink(link)
+    if not itemID then
+        say(L["usage: /ledger roll <item link> (or Alt+click the item in your bags)"])
+        return
+    end
+    if not mayStartRolls() then
+        say(L["only the master looter or the raid lead can start rolls."])
+        return
+    end
+    Ledger:Show()
+    for _, entry in ipairs(active) do
+        if entry.later and entry.record and entry.record.itemID == itemID and entry.endsAt and not entry.winner then
+            selected, editing = entry, nil
+            updateRows()
+            status:SetText(string.format(L["%s is already being rolled."], entry.item))
+            return
+        end
+    end
+    local record
+    for _, r in ipairs(ensureDatabase().history) do
+        if r.itemID == itemID and isOpenAward(r) and isPlayer(r.recipient) then
+            record = r
+            break
+        end
+    end
+    record = record or recordAward({ item = link, rolls = {} }, playerName(), "held", true)
+    startLaterRoll(record)
+end
+ns.rollBagItem = rollBagItem
+
+if ContainerFrameItemButton_OnModifiedClick then
+    hooksecurefunc("ContainerFrameItemButton_OnModifiedClick", function(self, button)
+        if button ~= "LeftButton" or not IsAltKeyDown() or IsShiftKeyDown() or IsControlKeyDown() then return end
+        rollBagItem(GetContainerItemLink(self:GetParent():GetID(), self:GetID()))
+    end)
+end
+
 -- finishLaterRoll records the winner of a later roll. Held by the master
 -- looter, the award stays "held" for the winner until the trade; parked with
 -- another raider, the winner becomes the recipient (the hand-over between two
@@ -2514,13 +2646,18 @@ Ledger:SetScript("OnEvent", function(self, event, ...)
             ForgeTestBridge:RegisterFrame("RaidLedgerRecipient", recipientBox)
             ForgeTestBridge:RegisterFrame("RaidLedgerRollDetail", rollDetail)
             ForgeTestBridge:RegisterFrame("RaidLedgerPark", park)
+            ForgeTestBridge:RegisterFrame("RaidLedgerParkText", parkText)
             ForgeTestBridge:RegisterFrame("RaidLedgerDisenchant", disenchantButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerBank", bankButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerHistory1", historyLines[1])
             ForgeTestBridge:RegisterFrame("RaidLedgerExportButton", exportButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerExportText", exportText)
             ForgeTestBridge:RegisterFrame("RaidLedgerRollHeading", rollHeading)
-            for i = 1, 3 do ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i, rows[i]) end
+            for i = 1, 3 do
+                ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i, rows[i])
+                ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i .. "Count", rows[i].count)
+                ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i .. "Holder", rows[i].holder)
+            end
             for i = 1, 4 do ForgeTestBridge:RegisterFrame("RaidLedgerMember" .. i, rosterButtons[i]) end
             ForgeTestBridge:RegisterFrame("RaidLedgerAllMembers", roster.all)
             ForgeTestBridge:RegisterFrame("RaidLedgerMembers", roster.pane)
@@ -2610,6 +2747,7 @@ local HELP = {
     L["/ledger start - start a %d s /rnd roll for the selected item"],
     L["/ledger timer [seconds] [tie-break seconds] - roll lengths for new rolls; /ledger timer reset"],
     L["/ledger free - post the selected item again: free BoE roll for any character (/rnd 100)"],
+    L["/ledger roll <item link or ID> - roll an item from your bags (or Alt+click it in your bags)"],
     L["/ledger set <#> [name] - change the recipient of award #, or to your target"],
     L["/ledger del <#> - remove award # (exported as deleted)"],
     L["/ledger spec <#> ms|os|none - set which tally award # counts for"],
@@ -2640,6 +2778,8 @@ SlashCmdList["RAIDLEDGER"] = function(message)
         updateRows()
     elseif command == "start" then
         startSelectedRoll()
+    elseif command == "roll" then
+        rollBagItem(rest)
     elseif command == "free" then
         startFreeRoll()
     elseif command == "pass" then

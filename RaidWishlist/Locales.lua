@@ -8,8 +8,12 @@ ns.L = L
 if GetLocale() ~= "deDE" then return end
 
 -- Window
-L["LOOT WISHLIST"] = "LOOT-WUNSCHLISTE"
-L["WISHLIST FOR %s  /  ROLLS  /  WHO GOT WHAT"] = "WUNSCHLISTE VON %s  /  WÜRFE  /  WER BEKAM WAS"
+L["Window color"] = "Fensterfarbe"
+L["Click: pick a color"] = "Klick: Farbe wählen"
+L["Right-click: back to the default"] = "Rechtsklick: zurück zur Standardfarbe"
+L["window color reset."] = "Fensterfarbe zurückgesetzt."
+L["/wish color [reset] - pick the window color, or go back to the default"] =
+    "/wish color [reset] - Fensterfarbe wählen oder zur Standardfarbe zurück"
 L["IMPORT"] = "IMPORT"
 L["AUTO-ROLL: ON"] = "AUTO-WURF: AN"
 L["AUTO-ROLL: OFF"] = "AUTO-WURF: AUS"

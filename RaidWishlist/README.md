@@ -12,6 +12,11 @@ Open it with `/wish` (or `/raidwish`), or with the minimap button (drag it to
 move it around the minimap; `/wish minimap off` hides it). The window also
 opens by itself when the raid lead starts a roll on an item from your list.
 
+The window looks like RaidLedger's, in its own color: the color button in the
+header (or `/wish color`) opens the color picker, right-click (or
+`/wish color reset`) goes back to green. The color is shared by all your
+characters; very dark picks are brightened so the text stays readable.
+
 The addon speaks German in German clients (deDE) and English everywhere else
 (`Locales.lua`).
 
@@ -100,3 +105,4 @@ private. `/wish share off` stops sharing; `/wish share on` starts it again.
 | `/wish sync` | Ask the raid lead's ledger for this raid's awards |
 | `/wish share on` / `off` | Share your wishlist with the raid lead's ledger (on by default) |
 | `/wish minimap on` / `off` | Show / hide the minimap button |
+| `/wish color` / `color reset` | Pick the window color / back to the default |

@@ -8,13 +8,15 @@ Purpose-built **World of Warcraft: Wrath of the Lich King (3.3.5a)** addons for 
 
 | Addon | Who uses it | What it does | Open it |
 | --- | --- | --- | --- |
-| **[RaidLedger](#-raidledger)** | Raid lead / master looter | Invites the website's raid list, sorts groups by role, exports attendance, runs the loot rolls (main/off spec, enhanced EP rolls, fewest-items-first, passes and roll corrections, free BoE rolls), records awards, trades, parked, disenchanted and guild-bank items, and exports the loot for the website. | `/ledger`, or **RAID** / **EXPORT** in its window |
+| **[RaidLedger](#-raidledger)** | Raid lead / master looter | Invites the website's raid list, creates the raid's calendar event, sorts groups by role, exports attendance, runs the loot rolls (main/off spec, enhanced EP rolls, fewest-items-first, passes and roll corrections, free BoE rolls, rolls on items from your bags), records awards, trades, parked, disenchanted and guild-bank items, and exports the loot for the website. | `/ledger` or the minimap button |
 | **[RaidWishlist](#-raidwishlist)** | Raid members | Imports the member's wishlist from the website, prompts (or rolls automatically) when a wished item is rolled, shows open items and who got what, and shares the wishlist with the raid lead. | `/wish` or the minimap button |
 | **[InviteMailer](#%EF%B8%8F-invitemailer)** | Officers | Sends personalized in-game letters containing individual invite codes. | `/im` |
 
 **RaidLedger replaces RaidSync**, which used to live here: it does everything RaidSync did (invites, groups, attendance, loot) and more. All three addons can be installed and enabled independently. The source, offline tests and live acceptance plans of RaidLedger and RaidWishlist are in [robinschweitz/addon-forge](https://github.com/robinschweitz/addon-forge) (`examples/`).
 
 ## 📦 Installation
+
+Guild members can download RaidLedger and RaidWishlist as ready-made zips on the guild website's **Addons** page (one folder per zip, unzip into `Interface/AddOns/`). Or get them here:
 
 1. Download this repository using **Code → Download ZIP**, or clone it:
 
@@ -33,7 +35,8 @@ Purpose-built **World of Warcraft: Wrath of the Lich King (3.3.5a)** addons for 
            │   ├── RaidLedger.toc
            │   ├── Locales.lua
            │   ├── RaidLedger.lua
-           │   └── Raid.lua
+           │   ├── Raid.lua
+           │   └── Minimap.lua
            ├── RaidWishlist/
            │   ├── RaidWishlist.toc
            │   ├── Locales.lua
@@ -52,7 +55,7 @@ Purpose-built **World of Warcraft: Wrath of the Lich King (3.3.5a)** addons for 
 
 ## ⚔️ RaidLedger
 
-The raid lead's addon. Its window has three panes (loot items, the selected award, recent awards) and two buttons at the top: **RAID** (raid setup) and **EXPORT** (loot export). See [`RaidLedger/README.md`](RaidLedger/README.md) for every detail.
+The raid lead's addon. Its window has three panes (loot items, the selected award, recent awards) and two buttons at the top: **RAID** (raid setup) and **EXPORT** (loot export). `/ledger` or the minimap button opens it (drag the button to move it, `/ledger minimap off` hides it). See [`RaidLedger/README.md`](RaidLedger/README.md) for every detail.
 
 ### Raid setup: invites, groups, attendance (formerly RaidSync)
 
@@ -62,9 +65,10 @@ The raid lead's addon. Its window has three panes (loot items, the selected awar
 4. **RETRY MISSING** (**FEHLENDE ERNEUT**) invites everyone who declined or did not answer again.
 5. **SORT GROUPS** (**GRUPPEN SORTIEREN**) puts tanks, then healers, then the rest into groups of five (raid lead or assistant). It is a simple role sort, not a composition planner.
 6. At the end, **EXPORT** under „Teilnahme für die Webseite“ lists everyone seen in the raid, including late additions from the world chat and players who left again. Copy it (Ctrl+C) into the website's **Aufstellung** import.
+7. **CALENDAR EVENT** (**KALENDER-TERMIN**, or `/ledger calendar`) prepares a raid event in the game calendar for the list's date and start time (realm time); **CREATE EVENT** (**TERMIN ERSTELLEN**) then adds it and invites everyone on the list, the bench too. The website adds date and time to the list for raids of a raid series; lists without them are still read, only the calendar event needs them.
 
 ```text
-RS2;INV;42;ICC 25 Mittwoch;25
+RS2;INV;42;ICC 25 Mittwoch;25;2026-11-05;20:00
 Thorgar;TANK;Krieger;0
 Aelira;HEAL;Priester;0
 Standby;DD;Jäger;1
@@ -81,6 +85,7 @@ Latejoin;PALADIN;1760001200
 - Under the items the window lists the selected item's rolls. **Right-click a roll** to take a pass (the next-best roll wins) or to count it differently: main spec, off spec, not at all, or an enhanced roll with corrected points (110 from 21-120 with 10 instead of 20 EP becomes 100 from 11-110). This also works in a given-out award's roll log: the award then moves to the new winner.
 - The four buttons under the award button show the rollers, winner first; **ALL (n)** opens the whole raid by group to pick any recipient.
 - A bind-on-equip item nobody rolls on can be posted again as a **free BoE roll** for any character (`/rnd 100`, highest wins, counts for nobody).
+- **Alt+click an item in your bags** (or `/ledger roll <link or ID>`) to roll it out later, e.g. after the loot window closed; the winner gets it by trade. Items that still wait for a roll stay in the master loot list, marked **OPEN** with their holder, until they are rolled.
 - Every award is announced to the raid and shared with other ledger users and the members' wishlist addons. Raiders' shared wishlists show as **WL n** on each drop and `[WL #rank]` on rollers.
 - Click an award to see its rolls or change the recipient; `/ledger del <#>` removes one (the export keeps it as deleted).
 
@@ -99,6 +104,7 @@ The raid member's addon. See [`RaidWishlist/README.md`](RaidWishlist/README.md).
 3. When the raid lead rolls an item from your list, the window opens and a prompt offers **ROLL MS 21-120** (your spec and EP) or **SKIP**. **AUTO-ROLL** rolls for you, e.g. while you are away.
 4. The window also lists **open items** (on the corpse, with the master looter, parked with a raider) and **this raid's awards** with your item and token tally.
 5. Your wishlist is shared with the raid lead's ledger (`/wish share off` stops that). The minimap button opens the window; drag it to move it, `/wish minimap off` hides it.
+6. The window looks like RaidLedger's in its own color: the color button in its header (or `/wish color`) picks any color, right-click (or `/wish color reset`) goes back to green.
 
 ---
 
@@ -172,13 +178,16 @@ Each recipient gets the **same template**, with only their own name and code sub
 | `/ledger start` | Start a 30-second roll for the selected item |
 | `/ledger pass <name>` · `/ledger count <name> ms\|os\|none\|enh <0-50>` | Take a pass or change how a roll counts (selected item or shown award) |
 | `/ledger free` | Post the selected item again as a free BoE roll |
+| `/ledger roll <link or ID>` | Roll an item from your bags (same as Alt+click on it) |
+| `/ledger calendar` | Calendar raid event from the invite list, everyone invited |
+| `/ledger minimap on\|off` | Show / hide the minimap button |
 | `/ledger set <#> [name]` | Change the recipient of award # (without a name: your target) |
 | `/ledger del <#>` | Remove award # (exported as deleted) |
 | `/ledger tally` | Items per player this raid |
 | `/ledger export` | Show the loot export |
 | `/ledger help` | All ledger commands |
 | `/wish` | Show or hide the wishlist |
-| `/wish import` · `/wish auto on\|off` · `/wish share on\|off` · `/wish minimap on\|off` | Wishlist import and switches |
+| `/wish import` · `/wish auto on\|off` · `/wish share on\|off` · `/wish minimap on\|off` · `/wish color [reset]` | Wishlist import, switches and window color |
 | `/im`, `/invitemailer` | Toggle InviteMailer |
 | `/im reset` | Forget InviteMailer's successfully mailed recipients so they may be sent mail again |
 
