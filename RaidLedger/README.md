@@ -8,6 +8,9 @@ folder in [addon-forge](https://github.com/robinschweitz/addon-forge) is the
 source, with offline specs in `tests/` and live plans beside the folder
 (`RaidLedger-*.json`).
 
+Open and close it with `/ledger` or the minimap button (drag it to move it
+around the minimap; `/ledger minimap off` hides it).
+
 The addon speaks German in German clients (deDE): window, raid announcements,
 chat and help. Every other client gets English. Texts live in `Locales.lua`,
 keyed by their English wording.
@@ -33,15 +36,23 @@ keyed by their English wording.
    with class and first-seen time, also late additions and players who left.
    Paste it into the website's roster import. A list for another raid starts a
    new attendance.
+6. **CALENDAR EVENT** (or `/ledger calendar`) creates a raid event in the game
+   calendar for the list's date and start time and invites everyone on the
+   list, the bench too (they signed up). The invites go out one at a time;
+   names the server does not know are reported. Afterwards the ledger reads
+   the calendar back and says whether the server confirmed the event. The
+   calendar takes 100 characters per event, and only future dates.
 
 ```text
-RS2;INV;<raid ID>;<raid name>;<size>
+RS2;INV;<raid ID>;<raid name>;<size>;<YYYY-MM-DD>;<HH:MM>
 <name>;<TANK|HEAL|DD>;<class>;<bench 0/1>
 
 RS2;ROSTER;<raid ID>;<recorder>;<export time>
 <name>;<class token or ->;<first seen>
 ```
 
+Date and start time (realm time) are needed only for the calendar event; a
+list without them (`RS2;INV;<raid ID>;<raid name>;<size>`) is still read.
 Both are `;`-separated like the loot export. RaidSync's `RS1|INV` lists are not
 read: export the list again on the website.
 
@@ -203,6 +214,17 @@ Items do not have to be rolled right away:
   award: held by you, it waits for your trade to the winner; held by another
   raider, the winner becomes the recipient ("Bob hands it over"), since trades
   between other players are not visible.
+- **Items in your bags** can be rolled too: **Alt+click** the item in your bags
+  (or `/ledger roll <item link or ID>`). It is recorded as held by you (or its
+  open award is used) and the roll starts at once; the winner gets it by trade.
+  Only the master looter or the raid lead (solo: you) can start these rolls.
+- Open items stay in the **master loot list**, after the loot, until they are
+  rolled: marked `OPEN` with a purple frame and the holder ("with Bob"), and the
+  heading counts them ("MASTER LOOT ITEMS (2 OPEN)"), so none is forgotten
+  after the loot window closed. Click one to select its award (the button
+  reads **ROLL**). While a roll's log is shown, open rows leave it room for
+  four rolls. DE and guild-bank items are handed out for good and are not
+  listed there.
 - Open items do not count in anyone's tally. Wishlist users see them, and the
   loot still on the corpse, under **OPEN ITEMS**.
 
@@ -246,6 +268,9 @@ Click an award in the list, pick or type the recipient and press
 | `/ledger pass <name>` | The player passes on the selected item (or the shown award) |
 | `/ledger count <name> ms\|os\|none\|enh <0-50>` | Change how that player's roll counts |
 | `/ledger free` | Post the selected item again as a free BoE roll |
+| `/ledger roll <link or ID>` | Roll an item from your bags (same as Alt+click on it) |
+| `/ledger calendar` | Calendar raid event from the invite list, everyone invited |
+| `/ledger minimap on` / `off` | Show / hide the minimap button |
 | `/ledger tally` | Items per player this raid |
 | `/ledger sync` | Ask the group's ledgers for this raid's awards |
 

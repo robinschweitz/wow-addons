@@ -293,21 +293,74 @@ end
 ---------------------------------------------------------------------------
 -- UI
 ---------------------------------------------------------------------------
-local function makeBackdrop(frame, red, green, blue, alpha)
+-- Theme: the window looks like RaidLedger's, but every color derives from one
+-- accent the player picks (color button, /wish color). The pick is shared by
+-- all characters; too dark a pick is brightened so the text stays readable.
+local DEFAULT_ACCENT = { 0.40, 0.88, 0.48 }
+local palette = {}
+local themed = {}           -- { object, kind, key, alpha }
+
+local function computePalette(red, green, blue)
+    local top = math.max(red, green, blue)
+    if top < 0.05 then red, green, blue = 1, 1, 1 else red, green, blue = red / top, green / top, blue / top end
+    local function scale(k, add)
+        add = add or 0
+        return { red * k + add, green * k + add, blue * k + add }
+    end
+    local function mix(t, base)
+        base = base or 1
+        return { red + (base - red) * t, green + (base - green) * t, blue + (base - blue) * t }
+    end
+    return {
+        accent = { red, green, blue }, border = scale(0.81),
+        frame = scale(0.045, 0.007), pane = scale(0.085, 0.012), back = scale(0.02, 0.005),
+        button = scale(0.30, 0.01), buttonOn = scale(0.50, 0.02), close = scale(0.14, 0.05),
+        row = scale(0.24), rowMine = scale(0.36),
+        title = mix(0.4), buttonText = mix(0.65), text = mix(0.78), soft = mix(0.5, 0.55),
+        dim = mix(0.6, 0.5), faint = mix(0.68, 0.42),
+    }
+end
+
+local function paint(entry)
+    local object, kind, key, alpha = entry[1], entry[2], entry[3], entry[4]
+    local color = palette[key]
+    if kind == "backdrop" then
+        object:SetBackdropColor(color[1], color[2], color[3], alpha)
+        object:SetBackdropBorderColor(palette.border[1], palette.border[2], palette.border[3], 0.92)
+    elseif kind == "text" then
+        object:SetTextColor(color[1], color[2], color[3])
+    elseif kind == "texture" then
+        object:SetVertexColor(color[1], color[2], color[3], alpha or 1)
+    end
+end
+
+local function themeColor(object, kind, key, alpha)
+    local entry = { object, kind, key, alpha }
+    table.insert(themed, entry)
+    if palette[key] then paint(entry) end
+end
+
+palette = computePalette(DEFAULT_ACCENT[1], DEFAULT_ACCENT[2], DEFAULT_ACCENT[3])
+
+local function makeBackdrop(frame, key, alpha)
     frame:SetBackdrop({
         bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
         tile = true, tileSize = 16, edgeSize = 12,
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
-    frame:SetBackdropColor(red, green, blue, alpha)
-    frame:SetBackdropBorderColor(0.36, 0.72, 0.42, 0.92)
+    themeColor(frame, "backdrop", key, alpha)
 end
 
+-- color is a palette key (follows the theme) or a fixed {r, g, b}.
 local function label(parent, template, size, color)
     local text = parent:CreateFontString(nil, "OVERLAY", template)
     if size then text:SetFont(STANDARD_TEXT_FONT, size) end
-    if color then text:SetTextColor(color[1], color[2], color[3]) end
+    if type(color) == "string" then
+        themeColor(text, "text", color)
+    elseif color then
+        text:SetTextColor(color[1], color[2], color[3])
+    end
     return text
 end
 
@@ -315,8 +368,8 @@ local function flatButton(parent, name, caption, width, height)
     local button = CreateFrame("Button", name, parent)
     button:SetWidth(width)
     button:SetHeight(height or 22)
-    makeBackdrop(button, 0.10, 0.26, 0.15, 0.98)
-    local text = label(button, "GameFontNormal", 10, {0.78, 0.96, 0.80})
+    makeBackdrop(button, "button", 0.98)
+    local text = label(button, "GameFontNormal", 10, "buttonText")
     text:SetPoint("CENTER", button, "CENTER", 0, 0)
     button:SetFontString(text)
     button:SetText(caption)
@@ -329,8 +382,8 @@ local function listRow(parent, index, width, top, tagWidth)
     row:SetWidth(width)
     row:SetHeight(16)
     row:SetBackdrop({ bgFile = "Interface\\ChatFrame\\ChatFrameBackground" })
-    row:SetBackdropColor(0.08, 0.18, 0.11, 0)
-    local text = label(row, "GameFontNormalSmall", 10, {0.80, 0.90, 0.84})
+    row:SetBackdropColor(0, 0, 0, 0)
+    local text = label(row, "GameFontNormalSmall", 10, "text")
     text:SetPoint("LEFT", row, "LEFT", 5, 0)
     text:SetPoint("RIGHT", row, "RIGHT", -(tagWidth or 96), 0)
     text:SetJustifyH("LEFT")
@@ -343,7 +396,7 @@ local function listRow(parent, index, width, top, tagWidth)
 end
 
 Wishlist:SetWidth(470)
-Wishlist:SetHeight(440)
+Wishlist:SetHeight(428)
 Wishlist:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 Wishlist:SetFrameStrata("DIALOG")
 Wishlist:SetClampedToScreen(true)
@@ -352,41 +405,65 @@ Wishlist:SetMovable(true)
 Wishlist:RegisterForDrag("LeftButton")
 Wishlist:SetScript("OnDragStart", function(self) self:StartMoving() end)
 Wishlist:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-makeBackdrop(Wishlist, 0.020, 0.040, 0.030, 0.97)
+makeBackdrop(Wishlist, "frame", 0.97)
 -- Raise above RaidLedger (same strata) when shown or clicked, so the two
 -- windows never draw through each other.
 Wishlist:SetToplevel(true)
 Wishlist:SetScript("OnShow", function(self) self:Raise() end)
 Wishlist:Hide()
 
-local title = label(Wishlist, "GameFontNormalLarge", 17, {0.62, 0.92, 0.66})
-title:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 16, -16)
-title:SetText(L["LOOT WISHLIST"])
+-- Header as in RaidLedger: accent line, the addon's name, buttons on the right.
+local accent = Wishlist:CreateTexture(nil, "ARTWORK")
+accent:SetTexture("Interface\\Tooltips\\UI-Tooltip-Background")
+accent:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 10, -9)
+accent:SetPoint("TOPRIGHT", Wishlist, "TOPRIGHT", -10, -9)
+accent:SetHeight(2)
+themeColor(accent, "texture", "accent", 0.95)
 
-local subtitle = label(Wishlist, "GameFontNormalSmall", 10, {0.50, 0.66, 0.54})
-subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 1, -2)
+local title = label(Wishlist, "GameFontNormalLarge", 17, "title")
+title:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 18, -18)
+title:SetText("RaidWishlist")   -- the addon's name, not translated
 
-local close = flatButton(Wishlist, nil, "X", 24, 24)
-close:SetPoint("TOPRIGHT", Wishlist, "TOPRIGHT", -12, -12)
+local close = CreateFrame("Button", "RaidWishlistClose", Wishlist)
+close:SetWidth(24)
+close:SetHeight(24)
+close:SetPoint("TOPRIGHT", Wishlist, "TOPRIGHT", -13, -14)
+makeBackdrop(close, "close", 0.95)
+local closeText = label(close, "GameFontNormal", 14, "soft")
+closeText:SetPoint("CENTER", close, "CENTER", 0, 0)
+closeText:SetText("X")
 close:SetScript("OnClick", function() Wishlist:Hide() end)
 
 local importOpen = flatButton(Wishlist, "RaidWishlistImportOpen", L["IMPORT"], 70, 24)
-importOpen:SetPoint("RIGHT", close, "LEFT", -6, 0)
+importOpen:SetPoint("RIGHT", close, "LEFT", -8, 0)
 
 local autoButton = flatButton(Wishlist, "RaidWishlistAuto", L["AUTO-ROLL: OFF"], 120, 24)
 autoButton:SetPoint("RIGHT", importOpen, "LEFT", -6, 0)
 
+-- Color button: a swatch of the current accent; opens the color picker.
+local colorButton = CreateFrame("Button", "RaidWishlistColor", Wishlist)
+colorButton:SetWidth(24)
+colorButton:SetHeight(24)
+colorButton:SetPoint("RIGHT", autoButton, "LEFT", -6, 0)
+colorButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+makeBackdrop(colorButton, "close", 0.95)
+local swatch = colorButton:CreateTexture(nil, "ARTWORK")
+swatch:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
+swatch:SetPoint("TOPLEFT", colorButton, "TOPLEFT", 6, -6)
+swatch:SetPoint("BOTTOMRIGHT", colorButton, "BOTTOMRIGHT", -6, 6)
+themeColor(swatch, "texture", "accent")
+
 local wishPane = CreateFrame("Frame", nil, Wishlist)
-wishPane:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -60)
+wishPane:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -48)
 wishPane:SetWidth(446)
 wishPane:SetHeight(120)
-makeBackdrop(wishPane, 0.030, 0.065, 0.045, 0.97)
+makeBackdrop(wishPane, "pane", 0.97)
 
 local wishHeading = label(wishPane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
 wishHeading:SetPoint("TOPLEFT", wishPane, "TOPLEFT", 12, -10)
 wishHeading:SetText(L["MY WISHLIST"])
 
-local wishEmpty = label(wishPane, "GameFontNormalSmall", 11, {0.48, 0.64, 0.52})
+local wishEmpty = label(wishPane, "GameFontNormalSmall", 11, "dim")
 wishEmpty:SetPoint("CENTER", wishPane, "CENTER", 0, -8)
 wishEmpty:SetJustifyH("CENTER")
 wishEmpty:SetText(L["No wishlist yet.\nCopy the export on the guild website, then IMPORT."])
@@ -397,13 +474,13 @@ local openPane = CreateFrame("Frame", nil, Wishlist)
 openPane:SetPoint("TOPLEFT", wishPane, "BOTTOMLEFT", 0, -8)
 openPane:SetWidth(446)
 openPane:SetHeight(103)
-makeBackdrop(openPane, 0.030, 0.065, 0.045, 0.97)
+makeBackdrop(openPane, "pane", 0.97)
 
 local openHeading = label(openPane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
 openHeading:SetPoint("TOPLEFT", openPane, "TOPLEFT", 12, -10)
 openHeading:SetText(L["OPEN ITEMS"])
 
-local openEmpty = label(openPane, "GameFontNormalSmall", 11, {0.48, 0.64, 0.52})
+local openEmpty = label(openPane, "GameFontNormalSmall", 11, "dim")
 openEmpty:SetPoint("CENTER", openPane, "CENTER", 0, -8)
 openEmpty:SetJustifyH("CENTER")
 openEmpty:SetText(L["No loot is waiting to be rolled."])
@@ -414,25 +491,25 @@ local raidPane = CreateFrame("Frame", nil, Wishlist)
 raidPane:SetPoint("TOPLEFT", openPane, "BOTTOMLEFT", 0, -8)
 raidPane:SetWidth(446)
 raidPane:SetHeight(120)
-makeBackdrop(raidPane, 0.030, 0.065, 0.045, 0.97)
+makeBackdrop(raidPane, "pane", 0.97)
 raidPane:EnableMouseWheel(true)
 
 local raidHeading = label(raidPane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
 raidHeading:SetPoint("TOPLEFT", raidPane, "TOPLEFT", 12, -10)
 raidHeading:SetText(L["THIS RAID"])
 
-local tallyText = label(raidPane, "GameFontNormalSmall", 9, {0.50, 0.66, 0.54})
+local tallyText = label(raidPane, "GameFontNormalSmall", 9, "faint")
 tallyText:SetPoint("TOPRIGHT", raidPane, "TOPRIGHT", -12, -11)
 tallyText:SetJustifyH("RIGHT")
 
-local raidEmpty = label(raidPane, "GameFontNormalSmall", 11, {0.48, 0.64, 0.52})
+local raidEmpty = label(raidPane, "GameFontNormalSmall", 11, "dim")
 raidEmpty:SetPoint("CENTER", raidPane, "CENTER", 0, -8)
 raidEmpty:SetJustifyH("CENTER")
 raidEmpty:SetText(L["Nothing handed out yet.\nAwards appear here when the raid lead uses RaidLedger."])
 
 for i = 1, RAID_ROWS do raidRows[i] = listRow(raidPane, i, 430, -28) end
 
-local status = label(Wishlist, "GameFontNormalSmall", 10, {0.46, 0.62, 0.50})
+local status = label(Wishlist, "GameFontNormalSmall", 10, "faint")
 status:SetPoint("BOTTOMLEFT", Wishlist, "BOTTOMLEFT", 16, 12)
 status:SetPoint("BOTTOMRIGHT", Wishlist, "BOTTOMRIGHT", -16, 12)
 status:SetJustifyH("LEFT")
@@ -441,21 +518,21 @@ status:SetText(L["Rolls start from the raid lead's RaidLedger  |  /wish help"])
 
 -- Import overlay: covers the two lists while shown.
 local importPanel = CreateFrame("Frame", "RaidWishlistImportPanel", Wishlist)
-importPanel:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -60)
+importPanel:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -48)
 importPanel:SetWidth(446)
 importPanel:SetHeight(351)
-makeBackdrop(importPanel, 0.030, 0.065, 0.045, 0.99)
+makeBackdrop(importPanel, "pane", 0.99)
 importPanel:SetFrameLevel(Wishlist:GetFrameLevel() + 5)
 importPanel:Hide()
 
-local importHint = label(importPanel, "GameFontNormalSmall", 10, {0.62, 0.80, 0.66})
+local importHint = label(importPanel, "GameFontNormalSmall", 10, "soft")
 importHint:SetPoint("TOPLEFT", importPanel, "TOPLEFT", 12, -12)
 importHint:SetText(L["Paste your wishlist export from the guild website (Ctrl+V):"])
 
 local importBack = CreateFrame("Frame", nil, importPanel)
 importBack:SetPoint("TOPLEFT", importPanel, "TOPLEFT", 10, -32)
 importBack:SetPoint("BOTTOMRIGHT", importPanel, "BOTTOMRIGHT", -10, 42)
-makeBackdrop(importBack, 0.01, 0.02, 0.015, 0.98)
+makeBackdrop(importBack, "back", 0.98)
 
 local importScroll = CreateFrame("ScrollFrame", nil, importBack)
 importScroll:SetPoint("TOPLEFT", importBack, "TOPLEFT", 8, -8)
@@ -469,6 +546,16 @@ importText:SetWidth(410)
 importText:SetHeight(220)
 importScroll:SetScrollChild(importText)
 importText:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+-- A multi-line edit box is only as tall as its text, so a click below the
+-- last line would miss it: the whole field takes the click and focuses it.
+local function focusImport()
+    importText:SetFocus()
+    importText:SetCursorPosition(string.len(importText:GetText() or ""))
+end
+importBack:EnableMouse(true)
+importBack:SetScript("OnMouseDown", focusImport)
+importScroll:EnableMouse(true)
+importScroll:SetScript("OnMouseDown", focusImport)
 
 local importButton = flatButton(importPanel, "RaidWishlistImportButton", L["IMPORT WISHLIST"], 130, 24)
 importButton:SetPoint("BOTTOMRIGHT", importPanel, "BOTTOMRIGHT", -10, 10)
@@ -484,14 +571,14 @@ Prompt:SetHeight(104)
 Prompt:SetPoint("TOP", UIParent, "TOP", 0, -20)
 Prompt:SetFrameStrata("FULLSCREEN_DIALOG")
 Prompt:SetClampedToScreen(true)
-makeBackdrop(Prompt, 0.020, 0.050, 0.030, 0.98)
+makeBackdrop(Prompt, "frame", 0.98)
 Prompt:Hide()
 
 local promptTitle = label(Prompt, "GameFontNormal", 11, {1.00, 0.82, 0.32})
 promptTitle:SetPoint("TOPLEFT", Prompt, "TOPLEFT", 12, -10)
 promptTitle:SetText(L["ON YOUR WISHLIST"])
 
-local promptTimer = label(Prompt, "GameFontNormalSmall", 10, {0.62, 0.80, 0.66})
+local promptTimer = label(Prompt, "GameFontNormalSmall", 10, "soft")
 promptTimer:SetPoint("TOPRIGHT", Prompt, "TOPRIGHT", -12, -11)
 promptTimer:SetJustifyH("RIGHT")
 
@@ -501,7 +588,7 @@ promptItem:SetPoint("TOPRIGHT", Prompt, "TOPRIGHT", -12, -28)
 promptItem:SetJustifyH("LEFT")
 promptItem:SetWordWrap(false)
 
-local promptNote = label(Prompt, "GameFontNormalSmall", 10, {0.62, 0.80, 0.66})
+local promptNote = label(Prompt, "GameFontNormalSmall", 10, "soft")
 promptNote:SetPoint("TOPLEFT", promptItem, "BOTTOMLEFT", 0, -4)
 promptNote:SetPoint("TOPRIGHT", promptItem, "BOTTOMRIGHT", 0, -4)
 promptNote:SetJustifyH("LEFT")
@@ -518,7 +605,8 @@ skipButton:SetPoint("LEFT", rollButton, "RIGHT", 8, 0)
 local function updateAutoButton()
     local _, char = ensureDatabase()
     autoButton:SetText(char.auto and L["AUTO-ROLL: ON"] or L["AUTO-ROLL: OFF"])
-    autoButton:SetBackdropColor(char.auto and 0.16 or 0.10, char.auto and 0.42 or 0.26, char.auto and 0.20 or 0.15, 0.98)
+    local color = char.auto and palette.buttonOn or palette.button
+    autoButton:SetBackdropColor(color[1], color[2], color[3], 0.98)
 end
 
 local function updateWishlist()
@@ -570,7 +658,8 @@ local function updateRaid()
             row.right:SetText(tag)
             local mine = isPlayer(awardOwner(award)) and award.state ~= "deleted"
             local wished = findWish(award.itemID) ~= nil
-            row:SetBackdropColor(0.10, mine and 0.30 or 0.20, 0.14, (mine or wished) and 0.9 or 0)
+            local fill = mine and palette.rowMine or palette.row
+            row:SetBackdropColor(fill[1], fill[2], fill[3], (mine or wished) and 0.9 or 0)
             row:Show()
         else
             row:Hide()
@@ -600,7 +689,7 @@ local function updateOpen()
             else
                 row.right:SetTextColor(1.00, 0.82, 0.30)
             end
-            row:SetBackdropColor(0.10, 0.20, 0.14, wished and 0.9 or 0)
+            row:SetBackdropColor(palette.row[1], palette.row[2], palette.row[3], wished and 0.9 or 0)
             row:Show()
         else
             row:Hide()
@@ -610,7 +699,6 @@ end
 
 local function refresh()
     refreshReceived()
-    subtitle:SetText(string.format(L["WISHLIST FOR %s  /  ROLLS  /  WHO GOT WHAT"], string.upper(playerName())))
     updateAutoButton()
     updateWishlist()
     updateOpen()
@@ -810,6 +898,52 @@ local function setAuto(on)
     say(char.auto and L["auto-roll is ON: wishlisted items are rolled for you."] or L["auto-roll is OFF: you get a roll prompt."])
 end
 
+local function applyTheme()
+    local color = ensureDatabase().color or DEFAULT_ACCENT
+    palette = computePalette(color[1], color[2], color[3])
+    for _, entry in ipairs(themed) do paint(entry) end
+    refresh()
+end
+
+local function setColor(red, green, blue)
+    ensureDatabase().color = red and { red, green, blue } or nil
+    applyTheme()
+end
+
+-- Blizzard's color picker; Cancel restores the color from before.
+local function pickColor()
+    local db = ensureDatabase()
+    local before = db.color or DEFAULT_ACCENT
+    ColorPickerFrame.func, ColorPickerFrame.cancelFunc = nil, nil
+    ColorPickerFrame.hasOpacity, ColorPickerFrame.opacityFunc = false, nil
+    ColorPickerFrame.previousValues = { before[1], before[2], before[3], wasDefault = db.color == nil }
+    ColorPickerFrame:SetColorRGB(before[1], before[2], before[3])
+    ColorPickerFrame.func = function() setColor(ColorPickerFrame:GetColorRGB()) end
+    ColorPickerFrame.cancelFunc = function(previous)
+        if previous.wasDefault then setColor(nil) else setColor(previous[1], previous[2], previous[3]) end
+    end
+    ColorPickerFrame:SetFrameStrata("FULLSCREEN_DIALOG")   -- above this window
+    ColorPickerFrame:Hide()
+    ColorPickerFrame:Show()
+end
+
+colorButton:SetScript("OnClick", function(_, button)
+    if button == "RightButton" then
+        setColor(nil)
+        say(L["window color reset."])
+    else
+        pickColor()
+    end
+end)
+colorButton:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+    GameTooltip:SetText(L["Window color"])
+    GameTooltip:AddLine(L["Click: pick a color"], 1, 1, 1)
+    GameTooltip:AddLine(L["Right-click: back to the default"], 0.7, 0.7, 0.7)
+    GameTooltip:Show()
+end)
+colorButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
 importOpen:SetScript("OnClick", function() showImport(not importPanel:IsShown()) end)
 importCancel:SetScript("OnClick", function() showImport(false) end)
 importButton:SetScript("OnClick", importWishlist)
@@ -826,7 +960,7 @@ local function showTooltip(owner, link, extra)
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
     local itemString = type(link) == "string" and string.match(link, "item:[%-%d:]+")
     if itemString then GameTooltip:SetHyperlink(itemString) else GameTooltip:ClearLines() end
-    if extra then GameTooltip:AddLine(extra, 0.62, 0.92, 0.66) end
+    if extra then GameTooltip:AddLine(extra, palette.title[1], palette.title[2], palette.title[3]) end
     GameTooltip:Show()
 end
 
@@ -929,7 +1063,7 @@ Wishlist:RegisterEvent("CHAT_MSG_ADDON")
 Wishlist:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         ensureDatabase()
-        refresh()
+        applyTheme()
         placeMinimapButton()
         syncAt = GetTime() + 10
         if ForgeTestBridge and ForgeTestBridge.RegisterFrame then
@@ -944,6 +1078,8 @@ Wishlist:SetScript("OnEvent", function(self, event, ...)
             ForgeTestBridge:RegisterFrame("RaidWishlistRaid1", raidRows[1])
             ForgeTestBridge:RegisterFrame("RaidWishlistOpen1", openRows[1])
             ForgeTestBridge:RegisterFrame("RaidWishlistMinimap", MinimapButton)
+            ForgeTestBridge:RegisterFrame("RaidWishlistColor", colorButton)
+            ForgeTestBridge:RegisterFrame("RaidWishlistImportField", importBack)
         end
     elseif event == "CHAT_MSG_ADDON" then
         onAddonMessage(...)
@@ -984,6 +1120,7 @@ local HELP = {
     L["/wish auto on|off - roll automatically on wishlisted items (e.g. while away)"],
     L["/wish sync - ask the raid lead's ledger for this raid's awards"],
     L["/wish minimap on|off - show or hide the minimap button"],
+    L["/wish color [reset] - pick the window color, or go back to the default"],
     L["/wish share on|off - show your wishlist to the raid lead's ledger (on by default)"],
 }
 
@@ -1006,6 +1143,14 @@ SlashCmdList["RAIDWISHLIST"] = function(message)
         if rest == "on" then shareAt = GetTime() + 1 end
     elseif command == "minimap" and (rest == "on" or rest == "off") then
         setMinimapButton(rest == "on")
+    elseif command == "color" or command == "colour" then
+        if rest == "reset" then
+            setColor(nil)
+            say(L["window color reset."])
+        else
+            Wishlist:Show()
+            pickColor()
+        end
     elseif command == "sync" then
         if requestSync() then say(L["asked the raid lead's ledger for this raid's awards."]) else say(L["not in a group."]) end
     else
