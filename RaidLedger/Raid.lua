@@ -173,25 +173,16 @@ end
 ---------------------------------------------------------------------------
 -- Panel
 ---------------------------------------------------------------------------
-local Ledger = ns.Ledger
-local panel = CreateFrame("Frame", "RaidLedgerRaidPanel", Ledger)
-panel:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 16, -48)
-panel:SetWidth(568)
-panel:SetHeight(332)
+-- The RAID tab (the window's tab bar shows it; the tab redraws the panel).
+local panel = CreateFrame("Frame", "RaidLedgerRaidPanel")
 ns.makeBackdrop(panel, 0.035, 0.070, 0.105, 0.97)
-panel:Hide()
-ns.addOverlay(panel)
-
-local raidButton = ns.flatButton(Ledger, L["RAID"], 56)
-_G.RaidLedgerRaidButton = raidButton
-raidButton:SetPoint("RIGHT", ns.headerButton, "LEFT", -8, 0)
+local raidTab = ns.addTab("raid", L["RAID"], panel, function() if ns.updateRaidPanel then ns.updateRaidPanel() end end,
+    "RaidLedgerRaidButton")
+local raidButton = raidTab.button
 
 local heading = ns.label(panel, "GameFontNormal", 11, {1.00, 0.80, 0.32})
 heading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -11)
 heading:SetText(L["RAID SETUP"])
-
-local backButton = ns.flatButton(panel, L["BACK"], 70)
-backButton:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -6)
 
 local hint = ns.label(panel, "GameFontNormalSmall", 9, {0.55, 0.72, 0.80})
 hint:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -34)
@@ -679,19 +670,14 @@ end
 ---------------------------------------------------------------------------
 -- Buttons, events, commands
 ---------------------------------------------------------------------------
-local function showPanel(show)
-    ns.showOverlay(show and panel or nil)
-    if show then
-        inviteText:SetText(setup().text or "")
-        updatePanel()
-    else
-        inviteText:ClearFocus()
-        rosterText:ClearFocus()
-    end
-end
-
-raidButton:SetScript("OnClick", function() showPanel(not panel:IsShown()) end)
-backButton:SetScript("OnClick", function() showPanel(false) end)
+ns.updateRaidPanel = updatePanel
+-- Opening the tab loads the saved invite list into the box.
+raidTab.view = function() inviteText:SetText(setup().text or "") end
+panel:SetScript("OnHide", function()
+    inviteText:ClearFocus()
+    rosterText:ClearFocus()
+end)
+local function showPanel() ns.ui.show("raid") end
 inviteText:SetScript("OnTextChanged", function(self) setup().text = self:GetText() end)
 readButton:SetScript("OnClick", readInvites)
 inviteButton:SetScript("OnClick", function() startInvites(false) end)
@@ -774,6 +760,18 @@ events:SetScript("OnUpdate", function(_, elapsed)
     inviteDelay = inviteDelay - elapsed
     if inviteDelay <= 0 then inviteStep() end
 end)
+
+-- Tooltips on every control (raid feedback 2026-10-19).
+ns.tip(raidButton, L["Raid setup: the website's invite list, invites, raid groups and attendance"])
+ns.tip(inviteText, L["Paste the website's invite list here (Ctrl+V), then READ"])
+ns.tip(readButton, L["Read the pasted invite list"])
+ns.tip(inviteButton, L["Invite everyone on the list who is not in the raid yet"])
+ns.tip(retryButton, L["Invite again whoever was offline, declined or did not answer"])
+ns.tip(benchButton, L["Also invite the players the website put on the bench"])
+ns.tip(calendarButton, L["Create a calendar raid event for the list's date and time, everyone on it invited"])
+ns.tip(attendanceButton, L["Who was in the raid, for the website's roster import"])
+ns.tip(rosterText, L["Ctrl+C copies the attendance; paste it into the website"])
+ns.tip(sortButton, L["Sort the raid groups: tanks, healers, then the rest"])
 
 ns.commands.setup = function() showPanel(true) end
 ns.commands.invite = function(rest) startInvites(ns.lower(rest) == "missing") end

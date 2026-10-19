@@ -20,6 +20,22 @@ characters; very dark picks are brightened so the text stays readable.
 The addon speaks German in German clients (deDE) and English everywhere else
 (`Locales.lua`).
 
+## The window
+
+Three tabs (2.0.0, after the raid feedback "you cannot scroll down the
+loot"), each a full-height list that scrolls with the mouse wheel; the corner
+shows which entries you see ("18-30 / 30 (mouse wheel)"), the tabs count their
+entries, and the window remembers the last tab:
+
+| Tab | What it lists |
+| --- | --- |
+| **WUNSCHLISTE** | Your wishlist in rank order: item, note, roll range (or `ERHALTEN`) |
+| **OFFEN** | Loot still waiting to be rolled, where it is and its status |
+| **DIESER RAID** | Who got what this raid (item, recipient, spec) and your items so far |
+
+A roll on a wishlisted item opens the window on **OFFEN**. Every header button
+and tab has a tooltip.
+
 ## Importing the wishlist
 
 On the guild website, copy your wishlist export, click **IMPORT** (or
@@ -67,7 +83,7 @@ does not roll on items you already received this raid.
 
 ## Open items
 
-**OPEN ITEMS** lists loot that is still waiting to be rolled: items on the
+**OFFEN** (open items) lists loot that is still waiting to be rolled: items on the
 corpse, items the master looter keeps for a later roll, and items parked with
 another raider (e.g. unique items), with where they are and their status:
 `OPEN`, `ROLLING NOW` or `WON: <name>`. Items on your wishlist are marked
@@ -76,7 +92,7 @@ or auto-roll when it is rolled.
 
 ## This raid
 
-The lower list shows every award the raid lead's ledger shares: item,
+**DIESER RAID** shows every award the raid lead's ledger shares: item,
 recipient and spec, with removed awards greyed out. Your items and items on
 your wishlist are highlighted; hover a row for the item tooltip. The header
 shows your own tally this raid, items and tokens as separate lists (main spec
