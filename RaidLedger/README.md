@@ -15,6 +15,25 @@ The addon speaks German in German clients (deDE): window, raid announcements,
 chat and help. Every other client gets English. Texts live in `Locales.lua`,
 keyed by their English wording.
 
+## The window
+
+One window with five tabs (2.5.0, after the raid feedback "cleaner, easier,
+everything in the UI"); each tab owns the full height, so long lists stay
+readable. Every button and field has a tooltip. Chat commands still work, but
+none is needed.
+
+| Tab | What it is for |
+| --- | --- |
+| **BEUTE** (loot) | The loot list (this corpse's drops, then the open items held until they are rolled), and the selected item: **ROLL** / **FREE BOE ROLL**, every roll with what the roller has **so far**, the recipient box, **GIVE + RECORD**, **PARK**, **DE**, **BANK** |
+| **VERGABEN** (awards) | Every award; the selected one: **COUNTS AS** main spec / off spec / nothing, change or restore its recipient, park / DE / BANK / **REMOVE**, its roll log; **EXPORT** and **NEW RAID** |
+| **SPIELER** (players' tally) | Every raid member with items and tokens per spec, the numbers the fewest-items rule ranks by; - / + corrections per player, and their awards |
+| **RAID** | Invites, raid groups, attendance, calendar event |
+| **EINSTELLUNGEN** (settings) | Editors, who runs which addon, roll lengths, minimap button, window position, sync |
+
+The source is split accordingly: `RaidLedger.lua` keeps all rules and state,
+`UI.lua` the window and shared widgets, `LootTab.lua`, `AwardsTab.lua`,
+`TallyTab.lua`, `Raid.lua` and `Access.lua` one tab each.
+
 ## Raid setup: invites, groups, attendance
 
 **RAID** (or `/ledger setup`) replaces the panes with the raid setup
@@ -59,10 +78,11 @@ read: export the list again on the website.
 ## Rolls
 
 Opening a loot window lists every item at or above the group's loot threshold.
-Select an item and type `/ledger start` to start a 30-second roll. Change the
-length with `/ledger timer <seconds> [tie-break seconds]` (roll 10-300 s,
-tie-break 5-120 s, default 30/15; `/ledger timer reset`), saved across `/reload`
-and new raids. A running roll keeps its time. The raid is reminded when half and
+Select an item and press **ROLL** (or `/ledger start`) to start a 30-second
+roll. Change the length in EINSTELLUNGEN or with
+`/ledger timer <seconds> [tie-break seconds]` (roll 10-300 s, tie-break
+5-120 s, default 30/15; `/ledger timer reset`), saved across `/reload` and new
+raids. A running roll keeps its time. The raid is reminded when half and
 a quarter of the time are left (30 s: at 15 and 8 seconds). The raid's rules:
 
 - `/rnd 100` (1-100) is **main spec**, `/rnd 99` (1-99) is **off spec**.
@@ -84,22 +104,21 @@ Announcements go to raid, then party, then local chat:
 
 ### The roll list
 
-Under the loot items, the left pane lists the selected item's rolls in winning
-order: name, spec (`MS`, `MS 21-120`, `OS`, `BoE`) and the roll, the winner
-marked, and ignored or passed rolls in grey with the reason. The mouse wheel
-scrolls a long list; the items stay in place. Click a roll to make its player
-the recipient.
+Beside the loot list, the selected item's rolls are listed in winning order:
+name (class colored), spec (`MS`, `MS 21-120`, `OS`, `BoE`), **SO FAR** (the
+roller's items of that spec this raid, the number the ranking used) and the
+roll. The winner is green, ignored or passed rolls grey with the reason. The
+mouse wheel scrolls a long list; the loot list stays in place.
 
 ### Picking the recipient
 
-The four buttons under the award button show the selected item's rollers in
-winning order with their roll (winner first), then the rest of the group.
-**ALL (n)** opens every raid member, one column per raid group, in class
-colors; click a name to make them the recipient.
+After a roll the winner is in the recipient box. Click any roll to make its
+player the recipient, or **ALL (n)** for every raid member, one column per raid
+group, in class colors.
 
 ### Passes and corrections
 
-Only the master looter changes rolls. Right-click a roll in the roll list for:
+Only the master looter (or an editor) changes rolls. Right-click a roll in the roll list for:
 
 - **PASS**: the player does not need the item after all. The roll is struck
   ("[item] - Bob passes."). Once a winner was announced, the next-best roll
@@ -115,8 +134,8 @@ Every change is announced ("[item] - Bob's roll counts as main spec 11-110
 (100)."), and the roll log keeps what was really rolled. The same commands:
 `/ledger pass <name>` and `/ledger count <name> ms|os|none|enh <0-50>`.
 
-The same right-click works in a given-out award's roll log (click the award
-first). If someone else now wins, the award goes to them like a recipient
+The same right-click works in a given-out award's roll log (VERGABEN, select
+the award). If someone else now wins, the award goes to them like a recipient
 change: announced with "(corrected)", the tally moves, and the old winner
 trades the item over. With nobody valid left, or a tie, the award stays and
 the ledger asks you to decide (DE, BANK or another recipient).
@@ -125,7 +144,7 @@ the ledger asks you to decide (DE, BANK or another recipient).
 
 When a roll on a bind-on-equip item ends without valid rolls, a popup offers
 to post it again **NOW** as a free roll for any character (**LATER**: select
-it and `/ledger free`). Only `/rnd 100` counts, the highest roll wins, the
+it and press **FREE BOE ROLL**, or `/ledger free`). Only `/rnd 100` counts, the highest roll wins, the
 award counts in nobody's tally and is exported with spec `boe`. A free roll
 takes passes, but no spec changes.
 
@@ -157,13 +176,49 @@ off spec, from the ledger itself: CLEAR / NEW RAID starts everyone at 0.
 Items and tokens (Weiheabzeichen) are two separate lists: item rolls rank by
 the item tally, token rolls by the token tally. Removed awards and awards
 without a roll do not count; an item you hold for the winner counts for the
-winner. `/ledger tally` lists everyone (items, then tokens), and
+winner. Items already won in the loot list but not handed out yet count for
+their winners too, so a second roll on the same corpse ranks correctly. The
+win announcement names both counts ("1 MS / 0 OS items so far").
+`/ledger tally` lists everyone (items, then tokens), and
 `/ledger spec <#> ms|os|none` moves an award to the other spec or out of
-the tally.
+the tally. A roll nobody takes is announced as "nobody wanted it" and the row
+shows NOBODY.
 
-Hover a group member for their items this raid, hover an award or a loot row
-for the item tooltip (plus the award and the recipient's tally), and hover a
-roll-log line for that roller's items.
+### Token bundles
+
+Identical tokens from one corpse are one row ("3x [Weiheabzeichen ...]") and
+one roll: the best rolls win one copy each, announced together. A tie only
+matters where it decides the last copy (the players above keep theirs, the
+tied ones roll again). GIVE + RECORD hands out one copy at a time and puts the
+next winner in the box; copies nobody rolled for are announced as unwanted.
+
+### Group loot
+
+If the group loots with need/greed instead of master loot, the items won
+("X won: [item]") are recorded too, without a spec, so they count for nobody
+until an editor sets one (VERGABEN, **COUNTS AS**, or `/ledger spec <#> ms|os`). Only one ledger in
+the group records them (the first editor by name; without editors the first
+leader or assistant running the addon).
+
+Hover a player (a roll, the ALL list, the tally) for their items this raid, and
+an award or a loot row for the item tooltip (plus the award and the
+recipient's tally).
+
+## Editors and addon users (EINSTELLUNGEN)
+
+The settings tab holds the editor list: the names that may start rolls,
+award, park and correct. Type a name and ADD (or + TARGET); adding the first
+one adds you too. Click a name to remove it. The list is saved for the
+account and shared with the group, so everybody else's ledger only watches:
+its buttons are greyed out, and it ignores awards from players
+who are not editors. An empty list keeps the old rules. In chat:
+`/ledger allow <name>`, `/ledger deny <name>`, `/ledger editors`.
+
+Below the list, every raid member shows which addon they run: green with the
+RaidLedger version, blue for RaidWishlist only, grey for no addon, gold for
+editors. CHECK asks the group again.
+
+Every control has a tooltip.
 
 ## Shared ledger
 
@@ -173,6 +228,8 @@ messages, with the award's roll log. Officers therefore see the same list,
 and their corrections travel back. A ledger without awards of its own follows
 the master looter's raid automatically, also after a NEW RAID; one with its
 own awards keeps them and warns instead of merging another raid's ledger.
+Only the ledger that recorded an award confirms and announces it when the
+loot line arrives, so two ledgers in a raid never announce an item twice.
 
 Every roll start (and tie-break) is shared too, so raid members running
 [RaidWishlist](../RaidWishlist) get a roll prompt, or an automatic
@@ -187,28 +244,27 @@ wins.
 ## Roll log
 
 Every award keeps what was rolled for it, and the log is saved with the ledger.
-Click an award in the list (scroll it with the mouse wheel) and the left pane
-shows its rolls instead of the loot items. It lists counted rolls in winning
-order (with spec and the tally the ranking used), then each tie-break round,
-and marks the winner. Rolls that did not count stay
-listed in grey with the reason: `re-roll`, a wrong range such as `1-1000`, or
-`not in tie-break`. Long logs scroll with the mouse wheel. Click the award
-again, or open new loot, to get the loot items back. Awards recorded before
-version 1.1 have no roll log.
+Select an award in VERGABEN and its rolls are listed under it: counted rolls in
+winning order (with spec and the tally the ranking used), then each tie-break
+round, the winner marked. Rolls that did not count stay listed in grey with the
+reason: `re-roll`, a wrong range such as `1-1000`, or `not in tie-break`. Long
+logs scroll with the mouse wheel. Awards recorded before version 1.1 have no
+roll log.
 
 ## Loot that waits: PARK and roll later
 
 Items do not have to be rolled right away:
 
-- **PARK** (next to the award button) hands the selected loot to the player in
+- **PARK** (next to GIVE + RECORD) hands the selected loot to the player in
   the recipient box, or to you when it is empty, to **hold until it is rolled**.
   Use it for unique items you cannot hold twice. The award shows `OPEN` and
   the raid sees "[item] is parked with Bob until it is rolled."
 - An item you take without a roll (also from the default master-loot menu) is
   open too, and trading it away parks it with the trade partner.
-- An award recorded otherwise can be parked afterwards: click it, put the
-  holder in the recipient box, press **PARK**.
-- To roll an open item later, click its award: the button reads **ROLL**. The
+- An award recorded otherwise can be parked afterwards: select it in
+  VERGABEN, put the holder in its recipient box, press **PARK**.
+- To roll an open item later, select it in the loot list (or its award: the
+  park button reads **ROLL**) and press **ROLL**. The
   item joins the roll list and the roll runs as usual (wishlist prompts and
   auto-rolls included). **RECORD AWARD** then writes the result onto the same
   award: held by you, it waits for your trade to the winner; held by another
@@ -218,25 +274,22 @@ Items do not have to be rolled right away:
   (or `/ledger roll <item link or ID>`). It is recorded as held by you (or its
   open award is used) and the roll starts at once; the winner gets it by trade.
   Only the master looter or the raid lead (solo: you) can start these rolls.
-- Open items stay in the **master loot list**, after the loot, until they are
-  rolled: marked `OPEN` with a purple frame and the holder ("with Bob"), and the
-  heading counts them ("MASTER LOOT ITEMS (2 OPEN)"), so none is forgotten
-  after the loot window closed. Click one to select its award (the button
-  reads **ROLL**). While a roll's log is shown, open rows leave it room for
-  four rolls. DE and guild-bank items are handed out for good and are not
-  listed there.
+- Open items stay in the **loot list**, under their own heading after the
+  loot ("OPEN ITEMS (2)"), with their holder ("with Bob"), and the list heading
+  counts them ("LOOT (5)  |  2 OPEN"), so none is forgotten after the loot
+  window closed. Select one and press **ROLL**. DE and guild-bank items are
+  handed out for good and are not listed there.
 - Open items do not count in anyone's tally. Wishlist users see them, and the
   loot still on the corpse, under **OPEN ITEMS**.
 
 ## Disenchant and guild bank
 
-Items nobody wants go to **DE** (disenchant) or **BANK** (guild bank), the
-small buttons next to **ALL**. The item goes to the name in the
+Items nobody wants go to **DE** (disenchant) or **BANK** (guild bank), next to
+**PARK**. The item goes to the name in the
 recipient box (the enchanter or the bank character), or stays with you when
 the box is empty. The award counts for nobody, is announced to the raid
 ("... will be disenchanted (Bob)."), and appears in the export as
-`disenchanted` or `bank`. On a selected award the buttons change it the same
-way.
+`disenchanted` or `bank`. A selected award in VERGABEN has the same buttons.
 
 ## Members' wishlists
 
@@ -250,14 +303,21 @@ ledger then asks again.
 
 ## Clearing old loot
 
-**CLEAR** (on the award list), **NEW RAID** (in the export) and
-`/ledger newraid` ask first, then empty the award ledger and forget the raid
-ID. Export before clearing. `/ledger newraid confirm` clears without asking.
+**NEW RAID** (in VERGABEN) and `/ledger newraid` ask first, then empty the
+award ledger, the tally corrections and the raid ID. Export before clearing.
+`/ledger newraid confirm` clears without asking. **EMPTY** in the loot list
+only drops the loot not handed out yet (`/ledger clear`).
 
 ## Corrections
 
-Click an award in the list, pick or type the recipient and press
-**CHANGE RECIPIENT**. Or use the slash commands:
+Select an award in VERGABEN: type (or click a roll for) the recipient and press
+**CHANGE RECIPIENT**; **COUNTS AS** moves it between the main-spec, off-spec
+and no tally; **REMOVE** asks, then marks it removed (a removed award is
+restored by setting a recipient again). In SPIELER, - / + correct a player's
+items or tokens per spec on top of the awards (e.g. loot from before the
+ledger ran): corrections count in the ranking, are shared with the group's
+ledgers, reset with a new raid and never go into the website export. The slash
+commands do the same:
 
 | Command | Effect |
 | --- | --- |
@@ -278,9 +338,9 @@ A removed award can be restored by setting a recipient again.
 
 ## Website export (RS2)
 
-`/ledger raid <id>` sets the website's raid ID, and **EXPORT** (or
-`/ledger export`) shows the selected text to copy with Ctrl+C.
-`/ledger newraid` (or CLEAR) empties the ledger and forgets the raid ID; export first.
+**EXPORT** in VERGABEN (or `/ledger export`) shows the export: type the
+website's raid ID (or `/ledger raid <id>`) and copy the selected text with
+Ctrl+C. **NEW RAID** empties the ledger and forgets the raid ID; export first.
 
 ```text
 RS2;LOOT;42;Raidleader;1760000000;1760003600

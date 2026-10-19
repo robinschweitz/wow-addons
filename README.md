@@ -35,7 +35,12 @@ Guild members can download RaidLedger and RaidWishlist as ready-made zips on the
            │   ├── RaidLedger.toc
            │   ├── Locales.lua
            │   ├── RaidLedger.lua
+           │   ├── UI.lua
+           │   ├── LootTab.lua
+           │   ├── AwardsTab.lua
+           │   ├── TallyTab.lua
            │   ├── Raid.lua
+           │   ├── Access.lua
            │   └── Minimap.lua
            ├── RaidWishlist/
            │   ├── RaidWishlist.toc
@@ -55,12 +60,20 @@ Guild members can download RaidLedger and RaidWishlist as ready-made zips on the
 
 ## ⚔️ RaidLedger
 
-The raid lead's addon. Its window has three panes (loot items, the selected award, recent awards) and two buttons at the top: **RAID** (raid setup) and **EXPORT** (loot export). `/ledger` or the minimap button opens it (drag the button to move it, `/ledger minimap off` hides it). See [`RaidLedger/README.md`](RaidLedger/README.md) for every detail.
+The raid lead's addon. `/ledger` or the minimap button opens it (drag the button to move it, `/ledger minimap off` hides it). Its window has five tabs, each using the full height so long loot lists stay readable; every button has a tooltip and everything works without chat commands. See [`RaidLedger/README.md`](RaidLedger/README.md) for every detail.
+
+| Tab | What it is for |
+| --- | --- |
+| **BEUTE** (loot) | The loot list (this corpse's drops, then the open items waiting for a roll) and the selected item: **ROLL** / **FREE BOE ROLL**, every roll with what the roller has **so far**, the recipient, **GIVE + RECORD**, **PARK**, **DE**, **BANK** |
+| **VERGABEN** (awards) | Every award; the selected one: counts as main spec / off spec / nothing, change or restore its recipient, park / DE / BANK / **REMOVE**, its roll log; **EXPORT** and **NEW RAID** |
+| **SPIELER** (players) | Every raid member with items and tokens per spec, the numbers the fewest-items rule ranks by; **- / +** corrections per player, and their awards |
+| **RAID** | Invites, raid groups, attendance, calendar event |
+| **EINSTELLUNGEN** (settings) | Editors (who may change the ledger), who runs which addon, roll lengths, minimap button, window position, sync |
 
 ### Raid setup: invites, groups, attendance (formerly RaidSync)
 
 1. On the website, open the raid's **Aufstellung → „Einladungen für Addon“** and copy the text.
-2. In game click **RAID** (or `/ledger setup`), paste it into the box and click **READ** (**EINLESEN**). The list shows every character with role and status. Reading the list also sets the website raid ID for the loot export.
+2. In game open the **RAID** tab (or `/ledger setup`), paste it into the box and click **READ** (**EINLESEN**). The list shows every character with role and status. Reading the list also sets the website raid ID for the loot export.
 3. Click **INVITE ALL** (**ALLE EINLADEN**). Invites go out in the website's order, about 0.3 s apart; a party becomes a raid as soon as someone joined. Known offline guild members are skipped; the bench only with **BENCH: YES**. Statuses: open, invited, in raid, declined, not found, in another group, offline, no answer, bench.
 4. **RETRY MISSING** (**FEHLENDE ERNEUT**) invites everyone who declined or did not answer again.
 5. **SORT GROUPS** (**GRUPPEN SORTIEREN**) puts tanks, then healers, then the rest into groups of five (raid lead or assistant). It is a simple role sort, not a composition planner.
@@ -80,18 +93,21 @@ Latejoin;PALADIN;1760001200
 
 ### Rolls and awards
 
-- Select an item in the master-loot window and `/ledger start`: a 30-second raid roll. `/rnd 100` is **main spec**, `/rnd 99` **off spec**, an enhanced main-spec roll is **1+X to 100+X** with X = min(EP, 50). Main spec beats off spec; within a spec the player with the **fewest items this raid** wins, then the roll. Tokens have their own tally. Ties get a 15-second tie-break.
+- Select an item in the loot list and press **ROLL** (or `/ledger start`): a 30-second raid roll (lengths in **EINSTELLUNGEN** or `/ledger timer`). `/rnd 100` is **main spec**, `/rnd 99` **off spec**, an enhanced main-spec roll is **1+X to 100+X** with X = min(EP, 50). Main spec beats off spec; within a spec the player with the **fewest items this raid** wins, then the roll. Tokens have their own tally. Ties get a 15-second tie-break.
 - **GIVE + RECORD** hands the item out through master loot; items you keep for later are followed through your trades. **PARK** leaves an item with a raider until it is rolled (unique items). **DE** and **BANK** send unwanted items to the enchanter or the guild bank character; they count for nobody.
-- Under the items the window lists the selected item's rolls. **Right-click a roll** to take a pass (the next-best roll wins) or to count it differently: main spec, off spec, not at all, or an enhanced roll with corrected points (110 from 21-120 with 10 instead of 20 EP becomes 100 from 11-110). This also works in a given-out award's roll log: the award then moves to the new winner.
-- The four buttons under the award button show the rollers, winner first; **ALL (n)** opens the whole raid by group to pick any recipient.
+- Beside the loot list the window lists the selected item's rolls with each roller's items so far. **Right-click a roll** to take a pass (the next-best roll wins) or to count it differently: main spec, off spec, not at all, or an enhanced roll with corrected points (110 from 21-120 with 10 instead of 20 EP becomes 100 from 11-110). This also works in a given-out award's roll log: the award then moves to the new winner.
+- After a roll the winner is in the recipient box; click any roll to make that player the recipient, or **ALL (n)** for the whole raid by group.
+- Identical tokens from one corpse are one **"3x"** roll: the best three rolls win. Group-loot wins ("X won: ...") are recorded too, without a spec, so they count for nobody until you set one.
 - A bind-on-equip item nobody rolls on can be posted again as a **free BoE roll** for any character (`/rnd 100`, highest wins, counts for nobody).
-- **Alt+click an item in your bags** (or `/ledger roll <link or ID>`) to roll it out later, e.g. after the loot window closed; the winner gets it by trade. Items that still wait for a roll stay in the master loot list, marked **OPEN** with their holder, until they are rolled.
+- **Alt+click an item in your bags** (or `/ledger roll <link or ID>`) to roll it out later, e.g. after the loot window closed; the winner gets it by trade. Items that still wait for a roll stay in the loot list under **OPEN ITEMS** with their holder until they are rolled.
 - Every award is announced to the raid and shared with other ledger users and the members' wishlist addons. Raiders' shared wishlists show as **WL n** on each drop and `[WL #rank]` on rollers.
-- Click an award to see its rolls or change the recipient; `/ledger del <#>` removes one (the export keeps it as deleted).
+- In **VERGABEN** select an award to see its rolls, change the recipient or what it counts as, or remove it (the export keeps it as deleted).
+- In **SPIELER**, **- / +** correct a player's items or tokens per spec on top of the awards (e.g. loot from before the ledger ran); corrections count in the ranking, are shared with the group's ledgers, reset with a new raid and never go into the website export.
+- Only the master looter and the **editors** set in **EINSTELLUNGEN** change rolls and awards; everyone else's ledger just follows. With two ledgers in the raid only the one that recorded an award announces it.
 
 ### Loot export
 
-**EXPORT** builds the website's loot import (`RS2;LOOT;...`, one line per award with roll, spec, range and winner). Copy it into the raid's **Loot-Import** on the website; the preview there lets staff check boss, recipient and award method before anything is saved. **NEW RAID** (or **CLEAR**) empties the ledger for the next raid; export first.
+**EXPORT** (in **VERGABEN**) builds the website's loot import (`RS2;LOOT;...`, one line per award with roll, spec, range and winner). Copy it into the raid's **Loot-Import** on the website; the preview there lets staff check boss, recipient and award method before anything is saved. **NEW RAID** empties the ledger and the tally corrections for the next raid; export first.
 
 ---
 
@@ -102,7 +118,7 @@ The raid member's addon. See [`RaidWishlist/README.md`](RaidWishlist/README.md).
 1. On your character page on the website, set main/second spec and Enhanced per wish and click **„Für Addon exportieren“**.
 2. In game: `/wish import` (or **IMPORT**), paste, **IMPORT WISHLIST**.
 3. When the raid lead rolls an item from your list, the window opens and a prompt offers **ROLL MS 21-120** (your spec and EP) or **SKIP**. **AUTO-ROLL** rolls for you, e.g. while you are away.
-4. The window also lists **open items** (on the corpse, with the master looter, parked with a raider) and **this raid's awards** with your item and token tally.
+4. The window has three tabs, each a full-height list that scrolls with the mouse wheel: **WUNSCHLISTE** (your wishes with note and roll range), **OFFEN** (open items: on the corpse, with the master looter, parked with a raider) and **DIESER RAID** (who got what, with your item and token tally).
 5. Your wishlist is shared with the raid lead's ledger (`/wish share off` stops that). The minimap button opens the window; drag it to move it, `/wish minimap off` hides it.
 6. The window looks like RaidLedger's in its own color: the color button in its header (or `/wish color`) picks any color, right-click (or `/wish color reset`) goes back to green.
 
@@ -176,6 +192,7 @@ Each recipient gets the **same template**, with only their own name and code sub
 | `/ledger groups` | Sort raid groups: tanks, healers, the rest |
 | `/ledger attendance` | Export who was in the raid |
 | `/ledger start` | Start a 30-second roll for the selected item |
+| `/ledger timer [seconds] [tie-break seconds]` | Roll lengths for new rolls (`/ledger timer reset`) |
 | `/ledger pass <name>` · `/ledger count <name> ms\|os\|none\|enh <0-50>` | Take a pass or change how a roll counts (selected item or shown award) |
 | `/ledger free` | Post the selected item again as a free BoE roll |
 | `/ledger roll <link or ID>` | Roll an item from your bags (same as Alt+click on it) |
@@ -183,6 +200,9 @@ Each recipient gets the **same template**, with only their own name and code sub
 | `/ledger minimap on\|off` | Show / hide the minimap button |
 | `/ledger set <#> [name]` | Change the recipient of award # (without a name: your target) |
 | `/ledger del <#>` | Remove award # (exported as deleted) |
+| `/ledger spec <#> ms\|os\|none` | Set what award # counts as |
+| `/ledger allow\|deny <name>` · `/ledger editors` | Add or remove an editor; list them |
+| `/ledger settings` | Editors and who runs the addons |
 | `/ledger tally` | Items per player this raid |
 | `/ledger export` | Show the loot export |
 | `/ledger help` | All ledger commands |
@@ -197,7 +217,7 @@ All addons use standard **WoW SavedVariables**:
 
 | SavedVariable | Contains |
 | --- | --- |
-| `RaidLedgerDB` | Awards with their roll logs, the raid ID, the imported invite list with statuses, the attendance seen in the raid |
+| `RaidLedgerDB` | Awards with their roll logs, the raid ID, tally corrections, editors, roll lengths, the imported invite list with statuses, the attendance seen in the raid |
 | `RaidWishlistDB` | Your wishlist per character (with your EP balance from the last export), this raid's awards, switches |
 | `InviteMailerDB` | Mail subject/body templates, recipient list (including invite codes), and successful-send history |
 

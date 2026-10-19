@@ -44,6 +44,16 @@ L["WON: %s"] = "AN: %s"
 L["WISHLIST  "] = "WUNSCH  "
 L["on the corpse"] = "auf der Leiche"
 L["with %s"] = "bei %s"
+L["WISHLIST"] = "WUNSCHLISTE"
+L["CANCEL"] = "ABBRECHEN"
+L["%d-%d / %d  (mouse wheel)"] = "%d-%d / %d  (Mausrad)"
+L["Auto-roll: roll on wishlisted items by yourself, without the prompt (e.g. while away)."] =
+    "Auto-Wurf: auf Wünsche automatisch würfeln, ohne Abfrage (z. B. wenn du kurz weg bist)."
+L["Import: paste your wishlist export from the guild website."] = "Import: Wunschlisten-Export der Gildenwebseite einfügen."
+L["Your wishlist in rank order, with the roll range you would use."] = "Deine Wunschliste nach Rang, mit deinem Würfelbereich."
+L["Loot still waiting to be rolled: on the corpse, or parked with a raider."] =
+    "Beute, die noch ausgewürfelt wird: auf der Leiche oder bei einem Raider geparkt."
+L["Who got what this raid, and your items so far."] = "Wer in diesem Raid was bekommen hat, und deine Items bisher."
 
 -- Roll prompt
 L["ON YOUR WISHLIST"] = "AUF DEINER WUNSCHLISTE"

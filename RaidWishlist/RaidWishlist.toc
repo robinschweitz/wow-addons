@@ -2,7 +2,7 @@
 ## Title: RaidWishlist
 ## Notes: Your loot wishlist: roll prompts or auto-rolls on wishlisted items, and who got what this raid
 ## Author: Addon Forge
-## Version: 1.4.0
+## Version: 2.0.0
 ## SavedVariables: RaidWishlistDB
 Locales.lua
 RaidWishlist.lua

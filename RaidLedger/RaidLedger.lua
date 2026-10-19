@@ -4,10 +4,13 @@
 -- corrections and exports the ledger for the raid website (RS2;LOOT).
 local addonName, ns = ...
 local L = ns.L
-local Ledger = CreateFrame("Frame", "RaidLedgerFrame", UIParent)
+local Ledger = CreateFrame("Frame")   -- events and timers; the window is UI.lua's
+-- The window (UI.lua and the tab files) fills these in; the core only calls them.
+local ui = { status = function() end, refresh = function() end, suggest = function() end,
+    show = function() end, shown = function() return false end }
+ns.ui = ui
 local MAX_HISTORY = 250
 local MAX_ACTIVE = 10
-local HISTORY_LINES = 4
 -- Default roll and tie-break lengths; /ledger timer changes them (saved).
 local ROLL_SECONDS = 30
 local TIE_SECONDS = 15
@@ -34,15 +37,12 @@ local windowCount = 0
 local lastKill          -- { guid, npc } of the latest creature death, for chests
 local trade             -- { partner, items, closedAt } of the open or just closed trade
 local patterns = {}
-local historyOffset = 0
-local rollOffset = 0
 local syncAt            -- when to ask the group for the shared ledger (after login)
 local wishAskAt         -- when to ask the group's wishlist addons for their lists
 local groupSize = 0
 -- Members' wishlists, shared by RaidWishlist ("W" messages). Kept for this
 -- session only; the ledger asks again after a login or /reload.
 local wishlists = {}    -- lower(name) -> { name, at, items = { [itemID] = { spec, enhanced, rank } } }
-local rows = {}
 
 local function trim(value)
     return (value or ""):match("^%s*(.-)%s*$")
@@ -160,6 +160,13 @@ local function itemCount(n, token)
     return n == 1 and L["1 item"] or string.format(L["%d items"], n)
 end
 
+-- specCounts: a player's main- and off-spec tally in one text ("1 MS / 0 OS
+-- items"); a single number confused the raid when an off-spec win said 0.
+function ns.specCounts(counts, name, token)
+    local entry = counts[lower(name)] or {}
+    return string.format(token and L["%d MS / %d OS tokens"] or L["%d MS / %d OS items"], entry.ms or 0, entry.os or 0)
+end
+
 -- ranksAbove orders counted rolls: main spec first, then the fewest items, then
 -- the highest roll.
 local function ranksAbove(a, b)
@@ -206,15 +213,37 @@ end
 -- keyed by lower-case name. Items and tokens (Weiheabzeichen) are separate
 -- lists: tallies() counts items, tallies(true) tokens. Removed awards and
 -- awards without a spec (handed out without a roll) do not count; a held item
--- counts for its winner.
-local function tallies(tokens)
+-- counts for its winner. Items already won in the roll list but not handed
+-- out yet count for their winners too (raid of 2026-10-19: loot stayed on the
+-- corpse while it was rolled, and the next roll said "0 items so far"), except
+-- the entry `except` that is being decided.
+local function tallies(tokens, except)
     local counts = {}
+    local function add(name, spec)
+        local key = lower(name)
+        counts[key] = counts[key] or { ms = 0, os = 0 }
+        counts[key][spec] = counts[key][spec] + 1
+    end
     for _, r in ipairs(ensureDatabase().history) do
         if (r.spec == "ms" or r.spec == "os") and r.state ~= "deleted" and not NO_TALLY[r.state]
             and (r.token and true or false) == (tokens and true or false) then
-            local key = lower((r.state == "held" and r.winner) or r.recipient)
+            add((r.state == "held" and r.winner) or r.recipient, r.spec)
+        end
+    end
+    for _, entry in ipairs(active) do
+        if entry ~= except and not entry.free and (isToken(entry.item) and true or false) == (tokens and true or false) then
+            for _, w in ipairs(entry.winners or { entry.winner }) do
+                if w.kind == "ms" or w.kind == "os" then add(w.name, w.kind) end
+            end
+        end
+    end
+    -- Corrections by hand (the tally tab) on top; a tally never drops below 0.
+    for key, fix in pairs(ensureDatabase().tallyAdjust or {}) do
+        local ms, os = fix[tokens and "tms" or "ms"] or 0, fix[tokens and "tos" or "os"] or 0
+        if ms ~= 0 or os ~= 0 then
             counts[key] = counts[key] or { ms = 0, os = 0 }
-            counts[key][r.spec] = counts[key][r.spec] + 1
+            counts[key].ms = math.max(0, counts[key].ms + ms)
+            counts[key].os = math.max(0, counts[key].os + os)
         end
     end
     return counts
@@ -310,7 +339,7 @@ end
 -- items, highest roll), then ignored rolls in the order they came in.
 local function sortedRollLog(entry)
     if not entry.rollLog then return {} end
-    local counts = tallies(isToken(entry.item))
+    local counts = tallies(isToken(entry.item), entry)
     local log = {}
     for index, r in ipairs(entry.rollLog) do
         local copy = { name = r.name, value = r.value, round = r.round, note = r.note, order = index,
@@ -416,6 +445,10 @@ local function publish(record, withLog)
 end
 
 local function findRoll(entry, name)
+    -- A bundle's winners from before a tie-break are not in its latest rolls.
+    for _, r in ipairs(entry.winners or {}) do
+        if lower(r.name) == lower(name) then return r end
+    end
     for _, r in ipairs(entry.rolls or {}) do
         if lower(r.name) == lower(name) then return r end
     end
@@ -430,7 +463,13 @@ local function recordAward(entry, recipient, state, confirmed)
     local winner = entry.winner and entry.winner.name
     local roll = findRoll(entry, recipient)
     if not roll and isPlayer(recipient) and winner then roll = findRoll(entry, winner) end
-    local log = sortedRollLog(entry)   -- before this award changes the tallies
+    local bundled = (entry.count or 1) > 1
+    -- Before this award changes the tallies; a bundle keeps the log of its
+    -- decision for every copy (its earlier copies count by now).
+    local log = entry.bundleLog or sortedRollLog(entry)
+    if bundled then entry.bundleLog = log end
+    -- A bundle copy belongs to the roller it was won by.
+    if bundled and roll then winner = roll.name end
     db.nextID = db.nextID + 1
     local record = {
         id = db.nextID,
@@ -457,13 +496,26 @@ local function recordAward(entry, recipient, state, confirmed)
         table.remove(db.history)
     end
     if NO_TALLY[record.state] then record.roll, record.spec, record.low, record.high, record.winner = nil, nil, nil, nil, nil end
+    if bundled then
+        -- One copy of a bundle: the rest stays in the loot list for the next
+        -- winner (the callers put that name in the box).
+        local owner = lower(roll and roll.name or recipient)
+        entry.count = entry.count - 1
+        entry.awarded = entry.awarded or {}
+        entry.awarded[owner] = true
+        for i = table.getn(entry.winners or {}), 1, -1 do
+            if lower(entry.winners[i].name) == owner then table.remove(entry.winners, i) end
+        end
+        entry.winner = entry.winners and entry.winners[1]
+        publish(record, true)
+        return record
+    end
     entry.record = record
     publish(record, true)
     for index = table.getn(active), 1, -1 do
         if active[index] == entry then table.remove(active, index) end
     end
     if selected == entry then selected = nil end
-    historyOffset = 0
     return record
 end
 
@@ -489,432 +541,20 @@ local function buildExport(raidID, recorder, startedAt, exportedAt, history)
     return table.concat(lines, "\n")
 end
 
-local function makeBackdrop(frame, red, green, blue, alpha)
-    frame:SetBackdrop({
-        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true,
-        tileSize = 16,
-        edgeSize = 12,
-        insets = { left = 3, right = 3, top = 3, bottom = 3 },
-    })
-    frame:SetBackdropColor(red, green, blue, alpha)
-    frame:SetBackdropBorderColor(0.20, 0.63, 0.82, 0.92)
-end
-
-local function label(parent, template, size, color)
-    local text = parent:CreateFontString(nil, "OVERLAY", template)
-    if size then text:SetFont(STANDARD_TEXT_FONT, size) end
-    if color then text:SetTextColor(color[1], color[2], color[3]) end
-    return text
-end
-
-local function flatButton(parent, caption, width, name)
-    local button = CreateFrame("Button", name, parent)
-    button:SetWidth(width)
-    button:SetHeight(24)
-    makeBackdrop(button, 0.08, 0.25, 0.34, 0.98)
-    local text = label(button, "GameFontNormal", 10, {0.70, 0.93, 1.00})
-    text:SetPoint("CENTER", button, "CENTER", 0, 0)
-    button:SetFontString(text)
-    button:SetText(caption)
-    return button
-end
-
-Ledger:SetWidth(600)
-Ledger:SetHeight(410)
-Ledger:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
-Ledger:SetFrameStrata("DIALOG")
-Ledger:SetClampedToScreen(true)
-Ledger:SetToplevel(true)   -- clicking it raises it above RaidWishlist
-Ledger:EnableMouse(true)
-Ledger:SetMovable(true)
-Ledger:RegisterForDrag("LeftButton")
-Ledger:SetScript("OnDragStart", function(self) self:StartMoving() end)
-Ledger:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-makeBackdrop(Ledger, 0.018, 0.031, 0.055, 0.97)
-
-local accent = Ledger:CreateTexture(nil, "ARTWORK")
-accent:SetTexture("Interface\\Tooltips\\UI-Tooltip-Background")
-accent:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 10, -9)
-accent:SetPoint("TOPRIGHT", Ledger, "TOPRIGHT", -10, -9)
-accent:SetHeight(2)
-accent:SetVertexColor(0.25, 0.78, 1.00, 0.95)
-
-local title = label(Ledger, "GameFontNormalLarge", 17, {0.54, 0.88, 1.00})
-title:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 18, -18)
-title:SetText("RaidLedger")   -- the addon's name, not translated
-
-local close = CreateFrame("Button", nil, Ledger)
-close:SetWidth(24)
-close:SetHeight(24)
-close:SetPoint("TOPRIGHT", Ledger, "TOPRIGHT", -13, -14)
-makeBackdrop(close, 0.10, 0.16, 0.21, 0.95)
-local closeText = label(close, "GameFontNormal", 14, {0.72, 0.84, 0.90})
-closeText:SetPoint("CENTER", close, "CENTER", 0, 0)
-closeText:SetText("X")
-close:SetScript("OnClick", function() Ledger:Hide() end)
-
-local exportButton = flatButton(Ledger, L["EXPORT"], 70)
-exportButton:SetPoint("RIGHT", close, "LEFT", -8, 0)
-
-local rollPane = CreateFrame("Frame", "RaidLedgerRollPane", Ledger)
-rollPane:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 16, -48)
-rollPane:SetWidth(336)
-rollPane:SetHeight(228)
-makeBackdrop(rollPane, 0.035, 0.070, 0.105, 0.97)
-rollPane:EnableMouseWheel(true)
-
-local rollHeading = label(rollPane, "GameFontNormal", 11, {1.00, 0.80, 0.32})
-rollHeading:SetPoint("TOPLEFT", rollPane, "TOPLEFT", 12, -11)
-rollHeading:SetText(L["MASTER LOOT ITEMS"])
-
-local EMPTY_ACTIVE = L["Open the master loot window\nPlayers can then use /rnd"]
-local emptyRolls = label(rollPane, "GameFontNormalSmall", 11, {0.42, 0.61, 0.70})
-emptyRolls:SetPoint("CENTER", rollPane, "CENTER", 0, 10)
-emptyRolls:SetText(EMPTY_ACTIVE)
-emptyRolls:SetJustifyH("CENTER")
-
-local detailPane = CreateFrame("Frame", nil, Ledger)
-detailPane:SetPoint("TOPLEFT", rollPane, "TOPRIGHT", 12, 0)
-detailPane:SetWidth(220)
-detailPane:SetHeight(228)
-makeBackdrop(detailPane, 0.035, 0.070, 0.105, 0.97)
-
-local detailHeading = label(detailPane, "GameFontNormal", 11, {1.00, 0.80, 0.32})
-detailHeading:SetPoint("TOPLEFT", detailPane, "TOPLEFT", 12, -11)
-detailHeading:SetText(L["AWARD SELECTED LOOT"])
-
-local itemDetail = label(detailPane, "GameFontHighlight", 12, {0.94, 0.97, 1.00})
-itemDetail:SetPoint("TOPLEFT", detailPane, "TOPLEFT", 12, -34)
-itemDetail:SetPoint("TOPRIGHT", detailPane, "TOPRIGHT", -12, -34)
-itemDetail:SetHeight(26)
-itemDetail:SetJustifyH("LEFT")
-itemDetail:SetJustifyV("TOP")
-itemDetail:SetText(L["Select an active roll"])
-
-local rollDetail = label(detailPane, "GameFontNormalSmall", 10, {0.45, 0.68, 0.80})
-rollDetail:SetPoint("TOPLEFT", itemDetail, "BOTTOMLEFT", 0, -6)
-rollDetail:SetPoint("TOPRIGHT", itemDetail, "BOTTOMRIGHT", 0, -6)
-rollDetail:SetJustifyH("LEFT")
-rollDetail:SetWordWrap(false)
-rollDetail:SetText(L["No player rolls recorded"])
-
-local recipientBox = CreateFrame("EditBox", "RaidLedgerRecipient", detailPane, "InputBoxTemplate")
-recipientBox:SetPoint("TOPLEFT", detailPane, "TOPLEFT", 14, -100)
-recipientBox:SetWidth(198)
-recipientBox:SetHeight(24)
-recipientBox:SetAutoFocus(false)
-recipientBox:SetMaxLetters(24)
-recipientBox:SetTextInsets(5, 5, 0, 0)
-
-local recipientHint = label(detailPane, "GameFontNormalSmall", 9, {0.45, 0.60, 0.68})
-recipientHint:SetPoint("BOTTOMLEFT", recipientBox, "TOPLEFT", 1, 2)
-recipientHint:SetText(L["RECIPIENT NAME"])
-
-local award = CreateFrame("Button", nil, detailPane)
-award:SetPoint("TOPLEFT", recipientBox, "BOTTOMLEFT", -2, -10)
-award:SetWidth(136)
-award:SetHeight(26)
-makeBackdrop(award, 0.08, 0.25, 0.34, 0.98)
-local awardText = label(award, "GameFontNormal", 10, {0.70, 0.93, 1.00})
-awardText:SetPoint("CENTER", award, "CENTER", 0, 0)
-awardText:SetText(L["RECORD AWARD"])
-
--- PARK hands an item to a raider (or keeps it) to hold until it is rolled;
--- on an open award it reads ROLL and starts that roll.
-local park = CreateFrame("Button", "RaidLedgerPark", detailPane)
-park:SetPoint("LEFT", award, "RIGHT", 6, 0)
-park:SetWidth(54)
-park:SetHeight(26)
-makeBackdrop(park, 0.20, 0.12, 0.30, 0.98)
-local parkText = label(park, "GameFontNormal", 10, {0.92, 0.80, 1.00})
-parkText:SetPoint("CENTER", park, "CENTER", 0, 0)
-parkText:SetText(L["PARK"])
-
-local function stateButton(name, caption)
-    local button = CreateFrame("Button", name, detailPane)
-    button:SetHeight(16)
-    makeBackdrop(button, 0.16, 0.12, 0.24, 0.98)
-    local text = label(button, "GameFontNormalSmall", 9, {0.90, 0.82, 1.00})
-    text:SetPoint("CENTER", button, "CENTER", 0, 0)
-    button:SetFontString(text)
-    button:SetText(caption)
-    return button
-end
-local bankButton = stateButton("RaidLedgerBank", L["BANK"])
-bankButton:SetWidth(44)
-bankButton:SetPoint("TOPRIGHT", award, "BOTTOMLEFT", 196, -5)
-local disenchantButton = stateButton("RaidLedgerDisenchant", L["DE"])
-disenchantButton:SetWidth(30)
-disenchantButton:SetPoint("RIGHT", bankButton, "LEFT", -4, 0)
-
--- ALLE opens every raid member by group; the four buttons beside it show the
--- selected item's valid rollers (winner first), then the roster.
--- The main chunk is near Lua's 200-local limit: these live in one table.
-local roster = {}
-roster.all = stateButton("RaidLedgerAllMembers", "")
-roster.all:SetWidth(74)
-roster.all:SetPoint("TOPLEFT", award, "BOTTOMLEFT", 0, -5)
-makeBackdrop(roster.all, 0.06, 0.16, 0.22, 0.98)
-roster.all:GetFontString():SetTextColor(0.70, 0.93, 1.00)
-
--- memberButton: a name (class colored) and, for a roller, the roll on the right.
-function roster.button(parent, name, width)
-    local button = CreateFrame("Button", name, parent)
-    button:SetWidth(width)
-    button:SetHeight(18)
-    makeBackdrop(button, 0.045, 0.09, 0.13, 0.98)
-    -- 3.3.5a Buttons have no SetTextColor; color the button's own FontString.
-    local text = label(button, "GameFontNormalSmall", nil, {0.58, 0.79, 0.88})
-    text:SetPoint("LEFT", button, "LEFT", 6, 0)
-    text:SetPoint("RIGHT", button, "RIGHT", -6, 0)
-    text:SetJustifyH("LEFT")
-    text:SetWordWrap(false)
-    button:SetFontString(text)
-    button.roll = label(button, "GameFontNormalSmall", 9, {1.00, 0.80, 0.32})
-    button.roll:SetPoint("RIGHT", button, "RIGHT", -5, 0)
-    button.roll:SetJustifyH("RIGHT")
-    button:SetScript("OnClick", function(self) recipientBox:SetText(self.fullName or "") end)
-    return button
-end
-
--- showMember puts a member (or nobody) on a button; a roller's roll on the right.
-function roster.show(button, member, roll)
-    button.fullName, button.rollRef = member and member.name, member and roll
-    if not member then button:Hide() return end
-    button:SetText(member.name)
-    local color = member.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[member.class]
-    if color then
-        button:GetFontString():SetTextColor(color.r, color.g, color.b)
-    else
-        button:GetFontString():SetTextColor(0.58, 0.79, 0.88)
-    end
-    button.roll:SetText(roll and tostring(roll.value) or "")
-    button:GetFontString():SetPoint("RIGHT", button, "RIGHT", roll and -26 or -6, 0)
-    if roll then
-        button:SetBackdropColor(0.09, 0.17, 0.24, 0.98)
-    else
-        button:SetBackdropColor(0.045, 0.09, 0.13, 0.98)
-    end
-    button:Show()
-end
-
-local rosterButtons = {}
-for i = 1, 4 do
-    local button = roster.button(detailPane, "RaidLedgerMember" .. i, 96)
-    button:SetPoint("TOPLEFT", roster.all, "BOTTOMLEFT", ((i - 1) % 2) * 100, -4 - math.floor((i - 1) / 2) * 21)
-    rosterButtons[i] = button
-end
-
--- The whole raid, one column per raid group: opens under the member buttons,
--- over the recent awards, so ALLE stays visible to close it again.
-roster.pane = CreateFrame("Frame", "RaidLedgerMembers", Ledger)
-roster.pane:SetHeight(125)
-roster.pane:SetPoint("TOPLEFT", rollPane, "BOTTOMLEFT", 0, -4)
-roster.pane:SetPoint("TOPRIGHT", detailPane, "BOTTOMRIGHT", 0, -4)
-roster.pane:SetFrameLevel(Ledger:GetFrameLevel() + 20)
-makeBackdrop(roster.pane, 0.025, 0.052, 0.078, 0.99)
-roster.pane:EnableMouse(true)
-roster.pane:Hide()
-roster.headings, roster.groups = {}, {}
-for g = 1, 5 do
-    local x = 11 + (g - 1) * (106 + 4)
-    local heading = label(roster.pane, "GameFontNormalSmall", 9, {1.00, 0.80, 0.32})
-    heading:SetPoint("TOPLEFT", roster.pane, "TOPLEFT", x + 2, -8)
-    heading:SetText(string.format(L["GROUP %d"], g))
-    roster.headings[g] = heading
-    roster.groups[g] = {}
-    for row = 1, 5 do
-        local button = roster.button(roster.pane, nil, 106)
-        button:SetPoint("TOPLEFT", roster.pane, "TOPLEFT", x, -21 - (row - 1) * 20)
-        button:HookScript("OnClick", function() roster.pane:Hide() end)
-        roster.groups[g][row] = button
-    end
-end
-roster.all:SetScript("OnClick", function()
-    if roster.pane:IsShown() then roster.pane:Hide() else roster.pane:Show() end
-end)
-Ledger:HookScript("OnHide", function() roster.pane:Hide() end)
-
--- Right-click on a roll in the roll list: the master looter takes a pass or
--- changes how the roll counts (rules of 2026-10-17). A free BoE roll takes
--- passes only.
-roster.menu = CreateFrame("Frame", "RaidLedgerRollMenu", Ledger)
-roster.menu:SetWidth(132)
-roster.menu:SetFrameLevel(Ledger:GetFrameLevel() + 30)
-makeBackdrop(roster.menu, 0.035, 0.070, 0.105, 0.99)
-roster.menu:EnableMouse(true)
-roster.menu:Hide()
-roster.menu.title = label(roster.menu, "GameFontNormalSmall", 10, {0.94, 0.97, 1.00})
-roster.menu.title:SetPoint("TOPLEFT", roster.menu, "TOPLEFT", 10, -8)
-roster.menu.title:SetPoint("TOPRIGHT", roster.menu, "TOPRIGHT", -10, -8)
-roster.menu.title:SetJustifyH("LEFT")
-roster.menu.title:SetWordWrap(false)
-roster.menu.options = {}
-for _, option in ipairs({ { "Pass", L["PASS"], "pass" }, { "MS", L["MAIN SPEC"], "ms" },
-        { "Enhanced", L["ENHANCED..."], "enh" }, { "OS", L["OFF SPEC"], "os" },
-        { "None", L["DOES NOT COUNT"], "none" } }) do
-    local button = CreateFrame("Button", "RaidLedgerRollMenu" .. option[1], roster.menu)
-    button:SetWidth(112)
-    button:SetHeight(18)
-    if option[3] == "pass" then makeBackdrop(button, 0.20, 0.12, 0.30, 0.98)
-    else makeBackdrop(button, 0.06, 0.16, 0.22, 0.98) end
-    local text = label(button, "GameFontNormalSmall", 9, option[3] == "pass" and {0.92, 0.80, 1.00} or {0.70, 0.93, 1.00})
-    text:SetPoint("CENTER", button, "CENTER", 0, 0)
-    button:SetFontString(text)
-    button:SetText(option[2])
-    button.how = option[3]
-    button:SetScript("OnClick", function(self)
-        local name = roster.menu.name
-        roster.menu:Hide()
-        if self.how == "enh" then roster.askPoints(name) else roster.apply(name, self.how) end
-    end)
-    table.insert(roster.menu.options, button)
-end
-
-function roster.openMenu(button)
-    local menu = roster.menu
-    if menu:IsShown() and menu.name == button.fullName then menu:Hide() return end
-    menu.name = button.fullName
-    menu.title:SetText(string.format("%s (%d)", button.fullName, button.rollRef.value))
-    local free = button.rollRef.kind == "boe"
-    local y = -26
-    for _, option in ipairs(menu.options) do
-        if free and option.how ~= "pass" and option.how ~= "none" then
-            option:Hide()
-        else
-            option:ClearAllPoints()
-            option:SetPoint("TOPLEFT", menu, "TOPLEFT", 10, y)
-            option:Show()
-            y = y - 20
-        end
-    end
-    menu:SetHeight(-y + 6)
-    -- Under the roll (right edge, by its value), or above it near the window's
-    -- bottom: the menu stays inside the window.
-    menu:ClearAllPoints()
-    local bottom, ledgerBottom = button:GetBottom(), Ledger:GetBottom()
-    if bottom and ledgerBottom and bottom - menu:GetHeight() - 2 < ledgerBottom + 8 then
-        menu:SetPoint("BOTTOMRIGHT", button, "TOPRIGHT", 0, 2)
-    else
-        menu:SetPoint("TOPRIGHT", button, "BOTTOMRIGHT", 0, -2)
-    end
-    menu:Show()
-end
-Ledger:HookScript("OnHide", function() roster.menu:Hide() end)
-
-local historyPane = CreateFrame("Frame", "RaidLedgerHistoryPane", Ledger)
-historyPane:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 16, -286)
-historyPane:SetWidth(568)
-historyPane:SetHeight(94)
-makeBackdrop(historyPane, 0.025, 0.052, 0.078, 0.97)
-historyPane:EnableMouseWheel(true)
-
-local historyHeading = label(historyPane, "GameFontNormal", 11, {1.00, 0.80, 0.32})
-historyHeading:SetPoint("TOPLEFT", historyPane, "TOPLEFT", 12, -10)
-historyHeading:SetText(L["RECENT AWARDS"])
-
-local clearButton = flatButton(historyPane, L["CLEAR"], 56)
-clearButton:SetHeight(18)
-clearButton:SetPoint("TOPRIGHT", historyPane, "TOPRIGHT", -8, -6)
-
-local historySummary = label(historyPane, "GameFontNormalSmall", 9, {0.45, 0.60, 0.68})
-historySummary:SetPoint("RIGHT", clearButton, "LEFT", -10, 0)
-historySummary:SetJustifyH("RIGHT")
-
 local stateLabels = { given = L["GIVEN"], held = L["HELD BY YOU"], manual = L["MANUAL"], deleted = L["REMOVED"],
     parked = L["OPEN"], disenchanted = L["DISENCHANT"], bank = L["GUILD BANK"] }
-local stateColors = {
-    given = {0.45, 0.85, 0.55}, held = {1.00, 0.82, 0.30},
-    manual = {0.58, 0.79, 0.88}, deleted = {0.45, 0.45, 0.45}, parked = {0.85, 0.62, 1.00},
-    disenchanted = {0.75, 0.55, 1.00}, bank = {0.95, 0.85, 0.45},
-}
 
-local historyLines = {}
-for i = 1, HISTORY_LINES do
-    local line = CreateFrame("Button", nil, historyPane)
-    line:SetPoint("TOPLEFT", historyPane, "TOPLEFT", 8, -26 - (i - 1) * 15)
-    line:SetPoint("TOPRIGHT", historyPane, "TOPRIGHT", -8, -26 - (i - 1) * 15)
-    line:SetHeight(14)
-    line:SetBackdrop({ bgFile = "Interface\\ChatFrame\\ChatFrameBackground" })
-    line:SetBackdropColor(0.10, 0.21, 0.29, 0)
-    local text = label(line, "GameFontNormalSmall", 10, {0.72, 0.82, 0.88})
-    text:SetPoint("LEFT", line, "LEFT", 5, 0)
-    text:SetPoint("RIGHT", line, "RIGHT", -96, 0)
-    text:SetJustifyH("LEFT")
-    text:SetWordWrap(false)
-    line:SetFontString(text)
-    line.state = label(line, "GameFontNormalSmall", 9)
-    line.state:SetPoint("RIGHT", line, "RIGHT", -5, 0)
-    line.state:SetJustifyH("RIGHT")
-    historyLines[i] = line
+-- The core's functions that do not fit in the main chunk's 200 locals.
+local roster = {}
+
+-- roster.denied stops a change by someone who is not an editor (Access.lua)
+-- and says why, in the window and in chat.
+function roster.denied()
+    if not ns.mayEdit or ns.mayEdit() then return false end
+    ui.status(ns.deniedText())
+    say(ns.deniedText())
+    return true
 end
-
-local status = label(Ledger, "GameFontNormalSmall", 10, {0.42, 0.60, 0.68})
-status:SetPoint("BOTTOMLEFT", Ledger, "BOTTOMLEFT", 18, 12)
-status:SetPoint("BOTTOMRIGHT", Ledger, "BOTTOMRIGHT", -18, 12)
-status:SetJustifyH("LEFT")
-status:SetWordWrap(false)
-status:SetText(L["CLICK AN AWARD FOR ITS ROLLS OR TO CHANGE ITS RECIPIENT  |  /ledger help"])
-
--- Export overlay: replaces the three panes while shown.
-local exportPanel = CreateFrame("Frame", "RaidLedgerExportPanel", Ledger)
-exportPanel:SetPoint("TOPLEFT", Ledger, "TOPLEFT", 16, -48)
-exportPanel:SetWidth(568)
-exportPanel:SetHeight(332)
-makeBackdrop(exportPanel, 0.035, 0.070, 0.105, 0.97)
-exportPanel:Hide()
-
-local exportHeading = label(exportPanel, "GameFontNormal", 11, {1.00, 0.80, 0.32})
-exportHeading:SetPoint("TOPLEFT", exportPanel, "TOPLEFT", 12, -11)
-exportHeading:SetText(string.format(L["WEBSITE EXPORT  (%s LOOT)"], EXPORT_FORMAT))
-
-local raidLabel = label(exportPanel, "GameFontNormalSmall", 9, {0.45, 0.60, 0.68})
-raidLabel:SetPoint("TOPLEFT", exportPanel, "TOPLEFT", 12, -40)
-raidLabel:SetText(L["RAID ID"])
-
-local raidBox = CreateFrame("EditBox", nil, exportPanel, "InputBoxTemplate")
-raidBox:SetPoint("LEFT", raidLabel, "RIGHT", 12, 0)
-raidBox:SetWidth(80)
-raidBox:SetHeight(24)
-raidBox:SetAutoFocus(false)
-raidBox:SetNumeric(true)
-raidBox:SetMaxLetters(9)
-
-local newRaidButton = flatButton(exportPanel, L["NEW RAID"], 90)
-newRaidButton:SetPoint("TOPRIGHT", exportPanel, "TOPRIGHT", -12, -34)
-local backButton = flatButton(exportPanel, L["BACK"], 70)
-backButton:SetPoint("RIGHT", newRaidButton, "LEFT", -8, 0)
-
-local exportBack = CreateFrame("Frame", nil, exportPanel)
-exportBack:SetPoint("TOPLEFT", exportPanel, "TOPLEFT", 10, -66)
-exportBack:SetPoint("BOTTOMRIGHT", exportPanel, "BOTTOMRIGHT", -10, 10)
-makeBackdrop(exportBack, 0.01, 0.02, 0.03, 0.98)
-
-local exportScroll = CreateFrame("ScrollFrame", nil, exportBack)
-exportScroll:SetPoint("TOPLEFT", exportBack, "TOPLEFT", 8, -8)
-exportScroll:SetPoint("BOTTOMRIGHT", exportBack, "BOTTOMRIGHT", -8, 8)
-exportScroll:EnableMouseWheel(true)
-
-local exportText = CreateFrame("EditBox", "RaidLedgerExportText", exportScroll)
-exportText:SetMultiLine(true)
-exportText:SetAutoFocus(false)
-exportText:SetFontObject(ChatFontNormal)
-exportText:SetWidth(532)
-exportText:SetHeight(240)
-exportScroll:SetScrollChild(exportText)
-exportScroll:SetScript("OnMouseWheel", function(self, delta)
-    local range = self:GetVerticalScrollRange() or 0
-    local value = math.max(0, math.min(range, self:GetVerticalScroll() - delta * 28))
-    self:SetVerticalScroll(value)
-end)
-exportText:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-exportText:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
--- Read-only: typing restores the generated text.
-exportText:SetScript("OnTextChanged", function(self, userInput)
-    if userInput then self:SetText(self.generated or "") self:HighlightText() end
-end)
 
 local function activeRollCount(entry)
     return table.getn(entry.rolls)
@@ -976,130 +616,6 @@ function roster.members()
     return members
 end
 
--- rankedRollers: the counted rolls of the selected item (or of the award being
--- edited), best first, one per player.
-function roster.rollers()
-    local rolls = {}
-    if editing then
-        for _, r in ipairs(editing.rollLog or {}) do
-            if r.kind and not r.note and r.value then table.insert(rolls, r) end
-        end
-        table.sort(rolls, ranksAbove)
-    else
-        local entry = selectedEntry()
-        rolls = entry and entry.rolls or rolls
-    end
-    local ranked, seen = {}, {}
-    for _, r in ipairs(rolls) do
-        if r.name and not seen[string.lower(r.name)] then
-            seen[string.lower(r.name)] = true
-            table.insert(ranked, r)
-        end
-    end
-    return ranked
-end
-
-local function updateRoster()
-    local members = roster.members()
-    local byName = {}
-    for _, m in ipairs(members) do byName[string.lower(m.name)] = m end
-    local shown, rollOf = {}, {}
-    for _, r in ipairs(roster.rollers()) do
-        rollOf[string.lower(r.name)] = r
-        if table.getn(shown) < 4 then table.insert(shown, byName[string.lower(r.name)] or { name = r.name }) end
-    end
-    for _, m in ipairs(members) do
-        if table.getn(shown) >= 4 then break end
-        if not rollOf[string.lower(m.name)] then table.insert(shown, m) end
-    end
-    for i = 1, 4 do
-        local m = shown[i]
-        roster.show(rosterButtons[i], m, m and rollOf[string.lower(m.name)])
-    end
-    roster.all:SetText(string.format(L["ALL (%d)"], table.getn(members)))
-    -- The popout: members in roster order within their raid group.
-    local rows = { 0, 0, 0, 0, 0 }
-    for g = 1, 5 do
-        for row = 1, 5 do roster.groups[g][row]:Hide() end
-    end
-    for _, m in ipairs(members) do
-        local g = math.min(math.max(tonumber(m.group) or 1, 1), 5)
-        if rows[g] < 5 then
-            rows[g] = rows[g] + 1
-            roster.show(roster.groups[g][rows[g]], m, rollOf[string.lower(m.name)])
-        end
-    end
-    for g = 1, 5 do
-        if rows[g] > 0 then roster.headings[g]:Show() else roster.headings[g]:Hide() end
-    end
-end
-
-local function updateHistory()
-    local history = ensureDatabase().history
-    local total, held = table.getn(history), 0
-    for _, record in ipairs(history) do
-        if record.state == "held" then held = held + 1 end
-    end
-    historyOffset = math.max(0, math.min(historyOffset, total - HISTORY_LINES))
-    historyHeading:SetText(total > 0 and string.format(L["AWARDS (%d)"], total) or L["RECENT AWARDS"])
-    historySummary:SetText(held > 0 and string.format(L["%d HELD BY YOU  |  SCROLL FOR MORE"], held)
-        or (total > HISTORY_LINES and L["SCROLL FOR MORE"] or ""))
-    for i = 1, HISTORY_LINES do
-        local line = historyLines[i]
-        local record = history[i + historyOffset]
-        line.record = record
-        if record then
-            local text = string.format(L["#%d  %s  |  %s  ->  %s  (%d rolls)"], record.id, record.time or "",
-                record.item, record.recipient, record.rolls or 0)
-            if record.state == "deleted" then text = "|cff777777" .. string.gsub(text, "|c%x%x%x%x%x%x%x%x", "") .. "|r" end
-            line:SetText(text)
-            local stateText = stateLabels[record.state] or string.upper(record.state or "")
-            if record.state == "held" and not isPlayer(record.recipient) then stateText = L["HELD"] end
-            if isOpenAward(record) then stateText = L["OPEN"] end
-            if string.sub(record.item or "", 1, 5) == "item:" then
-                record.item = select(2, GetItemInfo(record.itemID or 0)) or record.item   -- now cached?
-            end
-            if not record.confirmed and record.state ~= "deleted" then stateText = stateText .. "?" end
-            local color = isOpenAward(record) and stateColors.parked or stateColors[record.state] or stateColors.manual
-            line.state:SetText(stateText)
-            line.state:SetTextColor(color[1], color[2], color[3])
-            line:SetBackdropColor(0.10, 0.21, 0.29, editing == record and 0.98 or 0)
-            line:Show()
-        else
-            line:SetText(i == 1 and L["No awards recorded in this ledger."] or "")
-            line.state:SetText("")
-            line:SetBackdropColor(0.10, 0.21, 0.29, 0)
-            if i == 1 then line:Show() else line:Hide() end
-        end
-    end
-end
-
-local function updateSelection()
-    if editing then
-        itemDetail:SetText(string.format("#%d %s", editing.id, editing.item))
-        rollDetail:SetText(string.format(L["NOW: %s (%s)"], editing.recipient, stateLabels[editing.state] or editing.state or ""))
-        awardText:SetText(editing.state == "deleted" and L["RESTORE + SET"] or L["CHANGE RECIPIENT"])
-        parkText:SetText(isOpenAward(editing) and L["ROLL"] or L["PARK"])
-        return
-    end
-    local entry = selectedEntry()
-    awardText:SetText(lootSlotOf(entry) and L["GIVE + RECORD"] or L["RECORD AWARD"])
-    parkText:SetText(L["PARK"])
-    if entry then
-        itemDetail:SetText(entry.item)
-        if entry.winner then
-            rollDetail:SetText(string.format(L["WINNER: %s (%d)"], entry.winner.name, entry.winner.value))
-        elseif entry.endsAt then
-            rollDetail:SetText(string.format(L["%d rolls  |  %ds remaining"], activeRollCount(entry), math.max(0, math.ceil(entry.endsAt - GetTime()))))
-        else
-            rollDetail:SetText(string.format(L["%d player rolls recorded"], activeRollCount(entry)))
-        end
-    else
-        itemDetail:SetText(L["Select an active roll"])
-        rollDetail:SetText(L["No player rolls recorded"])
-    end
-end
-
 -- winningRoll is the top counted roll of the last round in a sorted roll log.
 local function winningRoll(log)
     local best
@@ -1107,72 +623,6 @@ local function winningRoll(log)
         if not r.note and (not best or r.round > best.round) then best = r end
     end
     return best
-end
-
--- roster.lineText: a roll in the active roll list, "Name  MS 21-120".
-function roster.lineText(r, won)
-    local text = r.name
-    if (r.round or 1) > 1 then text = text .. string.format(L["  (tie-break %d)"], r.round - 1) end
-    if r.note then
-        local reason = L[r.note] or r.note
-        return "|cff777777" .. text .. string.format(L["  - ignored: %s"], reason) .. "|r"
-    end
-    if r.kind then text = text .. "  " .. rollLabel(r) end
-    if r.was then text = text .. L["  (corrected)"] end
-    if won then text = text .. L["  - won"] end
-    return text
-end
-
--- showRollLog fills the roll pane with the rolls of a recorded award.
-local function showRollLog(record)
-    local log = record.rollLog
-    local count = log and table.getn(log) or 0
-    rollOffset = math.max(0, math.min(rollOffset, count - MAX_ACTIVE))
-    rollHeading:SetText(count > MAX_ACTIVE and string.format(L["ROLLS FOR AWARD #%d  (%d, SCROLL)"], record.id, count)
-        or string.format(L["ROLLS FOR AWARD #%d"], record.id))
-    local winner = log and winningRoll(log)
-    for i = 1, MAX_ACTIVE do
-        local row, r = rows[i], log and log[i + rollOffset]
-        row.item, row.record = nil, nil
-        row.holder:SetText("")
-        row.text:SetPoint("RIGHT", row, "RIGHT", -86, 0)
-        row.logName, row.fullName = r and r.name, r and r.name
-        row.rollRef = r and r.kind and not r.note and r or nil
-        if r then
-            local text = r.name
-            if r.round > 1 then text = text .. string.format(L["  (tie-break %d)"], r.round - 1) end
-            if r.note then
-                text = "|cff777777" .. text .. string.format(L["  - ignored: %s"], L[r.note]) .. "|r"
-                row.count:SetTextColor(0.45, 0.45, 0.45)
-            elseif r == winner then
-                text = text .. L["  - won"]
-                row.count:SetTextColor(0.45, 0.85, 0.55)
-            else
-                row.count:SetTextColor(1.00, 0.79, 0.31)
-            end
-            -- Spec and the tally the ranking used (logs from before 1.2 have neither).
-            if r.kind and not r.note then
-                text = text .. "  (" .. rollLabel(r) .. ", " .. itemCount(r.tally or 0, record.token) .. ")"
-            end
-            if r.was then text = text .. string.format(L["  - corrected, rolled %s"], r.was) end
-            -- Rollers who listed the item show their wishlist rank.
-            local wish = wishOf(r.name, record.itemID)
-            if wish then text = text .. string.format(L["  [WL #%d]"], wish.rank) end
-            row:SetText(text)
-            row.wish:SetText("")
-            row.count:SetText(tostring(r.value))
-            row:SetBackdropColor(0.045, 0.09, 0.13, 0.98)
-            row:Show()
-        else
-            row:Hide()
-        end
-    end
-    if count == 0 then
-        emptyRolls:SetText(log and L["Awarded without a /rnd roll"] or L["Rolls were not recorded\nfor this older award"])
-        emptyRolls:Show()
-    else
-        emptyRolls:Hide()
-    end
 end
 
 -- openRecords: awards still to be rolled (parked, or kept without a roll),
@@ -1189,253 +639,6 @@ local function openRecords()
     end
     return list
 end
-
-local function updateRows()
-    -- An open award has no roll log: it stays selected in the loot list.
-    if editing and not isOpenAward(editing) then
-        showRollLog(editing)
-        updateSelection()
-        updateRoster()
-        updateHistory()
-        return
-    end
-    -- Open awards still have to be rolled: they stay in the loot list, after
-    -- the loot, marked OPEN, so the master looter cannot overlook them.
-    local open = openRecords()
-    rollHeading:SetText(table.getn(open) > 0 and string.format(L["MASTER LOOT ITEMS  (%d OPEN)"], table.getn(open))
-        or L["MASTER LOOT ITEMS"])
-    emptyRolls:SetText(EMPTY_ACTIVE)
-    -- Under the items: the selected item's rolls (left-click picks the
-    -- recipient, right-click passes or recounts), scrolled by the mouse wheel.
-    local current = selectedEntry()
-    local log = current and sortedRollLog(current) or {}
-    local count = table.getn(log)
-    local loot = math.min(table.getn(active), MAX_ACTIVE)
-    -- Open items give way to the selected roll's log (up to four lines); the
-    -- heading still counts them all.
-    local openRoom = MAX_ACTIVE - loot
-    if count > 0 then openRoom = math.max(0, openRoom - 1 - math.min(count, 4)) end
-    local items = loot + math.min(table.getn(open), openRoom)
-    local room = MAX_ACTIVE - items - 1
-    if count == 0 or room < 1 then room = 0 end
-    rollOffset = math.max(0, math.min(rollOffset, count - room))
-    local winner = current and current.winner and winningRoll(log)
-    local activeCount = 0
-    for i = 1, MAX_ACTIVE do
-        local entry = i <= loot and active[i]
-        local record = not entry and i <= items and open[i - loot]
-        local row = rows[i]
-        row.logName, row.fullName, row.rollRef, row.record = nil, nil, nil, nil
-        row.holder:SetText("")
-        row.text:SetPoint("RIGHT", row, "RIGHT", -86, 0)
-        row:GetFontString():SetTextColor(0.82, 0.91, 0.96)
-        row:SetBackdropBorderColor(0.20, 0.63, 0.82, 0.92)
-        if room > 0 and i == items + 1 then
-            row.item = nil
-            row:SetText(count > room and L["ROLLS (SCROLL)"] or L["ROLLS"])
-            row:GetFontString():SetTextColor(1.00, 0.80, 0.32)
-            row.count:SetText("")
-            row.wish:SetText("")
-            row:SetBackdropColor(0, 0, 0, 0)
-            row:SetBackdropBorderColor(0, 0, 0, 0)
-            row:Show()
-        elseif room > 0 and i > items + 1 and log[i - items - 1 + rollOffset] then
-            local r = log[i - items - 1 + rollOffset]
-            row.item = nil
-            row.logName, row.fullName = r.name, r.name
-            if r.kind and not r.note then row.rollRef = r end
-            row:SetText(roster.lineText(r, r == winner))
-            row.count:SetText(tostring(r.value))
-            if r.note then row.count:SetTextColor(0.45, 0.45, 0.45)
-            elseif r == winner then row.count:SetTextColor(0.45, 0.85, 0.55)
-            else row.count:SetTextColor(1.00, 0.79, 0.31) end
-            row.wish:SetText("")
-            row:SetBackdropColor(0.03, 0.06, 0.09, 0.98)
-            row:Show()
-        elseif entry then
-            activeCount = activeCount + 1
-            row.item = entry
-            row.logName = nil
-            row:SetText(string.format("%s", entry.item))
-            row.count:SetText(string.format(L["%d ROLLS"], activeRollCount(entry)))
-            row.count:SetTextColor(1.00, 0.79, 0.31)
-            -- How many wishlists name this item; "WL 0" flags loot nobody listed.
-            local wished = table.getn(wishersOf(itemIDFromLink(entry.item)))
-            row.wish:SetText(knowsWishlists() and string.format(L["WL %d"], wished) or "")
-            if wished > 0 then row.wish:SetTextColor(0.45, 0.85, 0.55) else row.wish:SetTextColor(0.50, 0.50, 0.50) end
-            local isSelected = selected == entry
-            row:SetBackdropColor(isSelected and 0.10 or 0.045, isSelected and 0.21 or 0.09, isSelected and 0.29 or 0.13, 0.98)
-            row:Show()
-        elseif record then
-            activeCount = activeCount + 1
-            row.item, row.logName, row.record = nil, nil, record
-            local color = stateColors.parked
-            row:SetText(record.item)
-            row.count:SetText(L["OPEN"])
-            row.count:SetTextColor(color[1], color[2], color[3])
-            local wished = table.getn(wishersOf(record.itemID))
-            row.wish:SetText(knowsWishlists() and string.format(L["WL %d"], wished) or "")
-            row.holder:SetText(string.format(L["with %s"], record.recipient or ""))
-            row.holder:ClearAllPoints()
-            row.holder:SetPoint("RIGHT", row, "RIGHT", knowsWishlists() and -86 or -52, 0)
-            row.text:SetPoint("RIGHT", row.holder, "LEFT", -6, 0)
-            if wished > 0 then row.wish:SetTextColor(0.45, 0.85, 0.55) else row.wish:SetTextColor(0.50, 0.50, 0.50) end
-            local isSelected = editing == record
-            row:SetBackdropColor(isSelected and 0.10 or 0.045, isSelected and 0.21 or 0.09, isSelected and 0.29 or 0.13, 0.98)
-            row:SetBackdropBorderColor(color[1], color[2], color[3], 0.80)
-            row:Show()
-        else
-            row.item = nil
-            row:Hide()
-        end
-    end
-    if activeCount == 0 then emptyRolls:Show() else emptyRolls:Hide() end
-    updateSelection()
-    updateRoster()
-    updateHistory()
-end
-
-for i = 1, MAX_ACTIVE do
-    local row = CreateFrame("Button", "RaidLedgerRow" .. i, rollPane)
-    row:SetPoint("TOPLEFT", rollPane, "TOPLEFT", 10, -29 - (i - 1) * 18)
-    row:SetWidth(316)
-    row:SetHeight(17)
-    makeBackdrop(row, 0.045, 0.09, 0.13, 0.98)
-    -- 3.3.5a Buttons have no SetTextColor/SetJustifyH/SetTextInsets: use a
-    -- FontString anchored with the same 7px/50px insets.
-    local rowText = label(row, "GameFontNormalSmall", nil, {0.82, 0.91, 0.96})
-    rowText:SetPoint("LEFT", row, "LEFT", 7, 0)
-    rowText:SetPoint("RIGHT", row, "RIGHT", -86, 0)
-    rowText:SetJustifyH("LEFT")
-    rowText:SetWordWrap(false)
-    row:SetFontString(rowText)
-    row.count = label(row, "GameFontNormalSmall", 9, {1.00, 0.79, 0.31})
-    row.count:SetPoint("RIGHT", row, "RIGHT", -7, 0)
-    row.wish = label(row, "GameFontNormalSmall", 9, {0.45, 0.85, 0.55})
-    row.wish:SetPoint("RIGHT", row, "RIGHT", -52, 0)
-    -- Who holds an open item: its own column, so a long item name is cut, not the name.
-    row.holder = label(row, "GameFontNormalSmall", 9, {0.85, 0.62, 1.00})
-    row.holder:SetPoint("RIGHT", row, "RIGHT", -52, 0)
-    row.text = rowText
-    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    row:SetScript("OnClick", function(self, which)
-        if which == "RightButton" then
-            if self.rollRef then roster.openMenu(self) end
-            return
-        end
-        if self.record then     -- an open award: select it, PARK reads ROLL
-            editing, selected, rollOffset = self.record, nil, 0
-            recipientBox:SetText(self.record.recipient or "")
-            updateRows()
-            return
-        end
-        if not self.item then   -- a roll line: its player becomes the recipient
-            if self.fullName then recipientBox:SetText(self.fullName) end
-            return
-        end
-        if selected ~= self.item then rollOffset = 0 end
-        selected = self.item
-        editing = nil
-        recipientBox:SetText(selected and selected.winner and selected.winner.name or "")
-        updateRows()
-    end)
-    rows[i] = row
-end
-
-for _, line in ipairs(historyLines) do
-    line:SetScript("OnClick", function(self)
-        if not self.record then return end
-        editing = (editing ~= self.record) and self.record or nil
-        selected = nil
-        rollOffset = 0
-        recipientBox:SetText(editing and editing.recipient or "")
-        updateRows()
-    end)
-end
-
-historyPane:SetScript("OnMouseWheel", function(_, delta)
-    historyOffset = historyOffset - delta
-    updateHistory()
-end)
-
--- Tooltips: items show their real item tooltip; players show what they got
--- this raid, so fairness calls need no extra window.
-local function showItemTooltip(owner, link)
-    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-    local itemString = type(link) == "string" and string.match(link, "item:[%-%d:]+")
-    if itemString then GameTooltip:SetHyperlink(itemString) else GameTooltip:ClearLines() end
-end
-
-local function addPlayerLines(name)
-    GameTooltip:AddLine(summaryLine(name), 0.45, 0.85, 1.00)
-    for _, record in ipairs(ensureDatabase().history) do
-        if record.state ~= "deleted" and lower(record.recipient) == lower(name) then
-            GameTooltip:AddLine("  " .. record.item .. (record.spec and ("  " .. string.upper(record.spec)) or "")
-                .. (record.token and L["  (token)"] or ""))
-        end
-    end
-end
-
-local function hideTooltip() GameTooltip:Hide() end
-
-for _, row in ipairs(rows) do
-    row:SetScript("OnEnter", function(self)
-        if self.item then
-            showItemTooltip(self, self.item.item)
-            local wishers = wishersOf(itemIDFromLink(self.item.item))
-            if table.getn(wishers) > 0 then
-                GameTooltip:AddLine(string.format(L["On %d wishlists:"], table.getn(wishers)), 0.45, 0.85, 1.00)
-                for _, wish in ipairs(wishers) do
-                    GameTooltip:AddLine(string.format(L["  %s - %s, #%d%s"], wish.name, SPEC_NAMES[wish.spec], wish.rank,
-                        wish.enhanced and L[", enhanced"] or ""), 0.8, 0.8, 0.8)
-                end
-            elseif knowsWishlists() then
-                GameTooltip:AddLine(L["On nobody's wishlist."], 0.6, 0.6, 0.6)
-            end
-        elseif self.logName then
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetText(self.logName)
-            addPlayerLines(self.logName)
-        else
-            return
-        end
-        GameTooltip:Show()
-    end)
-    row:SetScript("OnLeave", hideTooltip)
-end
-
-for _, line in ipairs(historyLines) do
-    line:SetScript("OnEnter", function(self)
-        local record = self.record
-        if not record then return end
-        showItemTooltip(self, record.item)
-        GameTooltip:AddLine(string.format(L["Award #%d: %s (%s)"], record.id, record.recipient,
-            stateLabels[record.state] or record.state or ""), 1, 1, 1)
-        if record.roll then
-            GameTooltip:AddLine(string.format(L["Roll %d, %s"], record.roll, record.spec and rollLabel({
-                kind = record.spec, low = record.low, high = record.high }) or L["spec unknown"]), 0.8, 0.8, 0.8)
-        end
-        addPlayerLines(record.recipient)
-        GameTooltip:Show()
-    end)
-    line:SetScript("OnLeave", hideTooltip)
-end
-
-for _, button in ipairs(rosterButtons) do
-    button:SetScript("OnEnter", function(self)
-        if not self.fullName then return end
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText(self.fullName)
-        addPlayerLines(self.fullName)
-        GameTooltip:Show()
-    end)
-    button:SetScript("OnLeave", hideTooltip)
-end
-
-rollPane:SetScript("OnMouseWheel", function(_, delta)
-    rollOffset = rollOffset - delta
-    updateRows()
-end)
 
 -- The loot source identifies a corpse or chest across reopened loot windows:
 -- the dead target's GUID, else the latest creature death (chests have no unit).
@@ -1469,18 +672,27 @@ local function addMasterLootItem(slot)
         if not lootSlots[slot] then lootSlots[slot] = { entry = entry, link = item } end
         return
     end
-    entry = { slot = slot, item = item, npc = windowNpc, rolls = {} }
+    -- Identical tokens from one corpse are one bundle, rolled once (raid
+    -- feedback 2026-10-19), while nothing has been rolled for it yet.
+    if isToken(item) then
+        for _, other in ipairs(active) do
+            if other.window == windowKey and other.item == item and not other.later and not other.rollLog then
+                other.count = (other.count or 1) + 1
+                drops[key] = other
+                lootSlots[slot] = { entry = other, link = item }
+                ui.refresh()
+                return
+            end
+        end
+    end
+    entry = { slot = slot, item = item, npc = windowNpc, rolls = {}, window = windowKey }
     drops[key] = entry
     lootSlots[slot] = { entry = entry, link = item }
     table.insert(active, 1, entry)
     while table.getn(active) > MAX_ACTIVE do table.remove(active) end
     -- New loot needs attention: leave the roll log of an old award.
-    if editing then
-        editing = nil
-        recipientBox:SetText("")
-    end
     if not selectedEntry() then selected = entry end
-    updateRows()
+    ui.refresh()
 end
 
 local function captureMasterLoot()
@@ -1511,9 +723,10 @@ local function onGiveMasterLoot(slot, candidate)
         publish(record)
     else
         record = recordAward(entry, name, mode or "given", false)
+        ui.suggest(entry)   -- a bundle's next winner
     end
-    status:SetText(string.format(L["Gave #%d to %s; waiting for the loot message."], record.id, name))
-    updateRows()
+    ui.status(string.format(L["Gave #%d to %s; waiting for the loot message."], record.id, name))
+    ui.refresh()
 end
 hooksecurefunc("GiveMasterLoot", onGiveMasterLoot)
 
@@ -1530,16 +743,39 @@ local function onLootMessage(message)
     local itemID = itemIDFromLink(link)
     if not itemID then return end
     for _, record in ipairs(ensureDatabase().history) do
+        -- Only the recorder confirms and announces an award: another ledger in
+        -- the group gets the confirmation with the shared record (two ledgers
+        -- announced every item twice in the raid of 2026-10-19).
         if not record.confirmed and record.state ~= "deleted" and record.itemID == itemID
-            and lower(record.recipient) == lower(name) then
+            and lower(record.recipient) == lower(name) and lower(record.origin or playerName()) == lower(playerName()) then
             record.confirmed = true
             publish(record)
-            status:SetText(string.format(L["Award #%d confirmed: %s received the item."], record.id, record.recipient))
+            ui.status(string.format(L["Award #%d confirmed: %s received the item."], record.id, record.recipient))
             announceAward(record)
-            updateHistory()
+            ui.refresh()
             return
         end
     end
+end
+
+-- roster.groupLoot records an item won with group loot (need/greed), which
+-- happened by accident in the raid of 2026-10-19 and left the ledger without
+-- those items. It counts for nobody until an editor sets its spec
+-- (/ledger spec). One ledger in the group records it (Access.lua).
+function roster.groupLoot(message)
+    patterns.rollWon = patterns.rollWon or patternFromFormat(LOOT_ROLL_WON or "%s won: %s")
+    patterns.rollYouWon = patterns.rollYouWon or patternFromFormat(LOOT_ROLL_YOU_WON or "You won: %s")
+    local name, link
+    link = string.match(message or "", patterns.rollYouWon)   -- first: "You won" also fits "%s won"
+    if link then name = playerName() else name, link = string.match(message or "", patterns.rollWon) end
+    if not name or not itemIDFromLink(link) then return false end
+    if ns.isLootRecorder and not ns.isLootRecorder() then return true end
+    local record = recordAward({ item = link, npc = lastKill and lastKill.npc, rolls = {} }, name, "given", true)
+    record.state = "given"   -- a group-loot win is the winner's own, never held for a trade
+    ui.status(string.format(L["Group loot: #%d %s won by %s (no spec; /ledger spec %d ms|os)."],
+        record.id, record.item, record.recipient, record.id))
+    ui.refresh()
+    return true
 end
 
 -- Trades: items the master looter kept ("held") move to the trade partner once
@@ -1617,10 +853,10 @@ local function onTradeComplete()
     trade = nil
     for _, record in ipairs(moved) do
         say(string.format(L["trade recorded: #%d %s -> %s"], record.id, record.item, record.recipient))
-        status:SetText(string.format(L["Award #%d traded: %s has the item now."], record.id, record.recipient))
+        ui.status(string.format(L["Award #%d traded: %s has the item now."], record.id, record.recipient))
         announceAward(record, L["traded"])
     end
-    if table.getn(moved) > 0 then updateRows() end
+    if table.getn(moved) > 0 then ui.refresh() end
 end
 
 local function onInfoMessage(...)
@@ -1639,6 +875,7 @@ end
 -- current player target is used. With `roll` (a re-decided roll), that roll's
 -- player becomes the award's winner.
 local function setRecipient(id, name, roll)
+    if roster.denied() then return false end
     local record = findRecord(id)
     if not record then
         say(string.format(L["no award #%s."], tostring(id)))
@@ -1661,23 +898,23 @@ local function setRecipient(id, name, roll)
     record.confirmed = true
     record.roll, record.low, record.high = roll and roll.value, roll and roll.low, roll and roll.high
     publish(record)
-    status:SetText(string.format(L["Award #%d now goes to %s."], record.id, record.recipient))
+    ui.status(string.format(L["Award #%d now goes to %s."], record.id, record.recipient))
     announceAward(record, L["corrected"])
-    updateRows()
+    ui.refresh()
     return true
 end
 
 local function deleteRecord(id)
+    if roster.denied() then return end
     local record = findRecord(id)
     if not record or record.state == "deleted" then
         say(string.format(L["no award #%s."], tostring(id)))
         return
     end
     record.state = "deleted"
-    publish(record)
-    if editing == record then editing = nil end
-    status:SetText(string.format(L["Award #%d removed; the export keeps it as deleted."], record.id))
-    updateRows()
+    publish(record)   -- stays selected in VERGABEN, where it can be restored
+    ui.status(string.format(L["Award #%d removed; the export keeps it as deleted."], record.id))
+    ui.refresh()
 end
 
 -- Receiving the shared ledger -------------------------------------------------
@@ -1733,6 +970,8 @@ end
 
 local function applyRecord(f, sender)
     local id, rev = tonumber(f[4]), tonumber(f[5])
+    -- With an editor list, only editors' ledgers change ours.
+    if ns.trusts and not ns.trusts(sender) then return end
     if not id or not rev or f[3] == "" or table.getn(f) < 19 or not acceptSession(f[2], sender) then return end
     local db = ensureDatabase()
     local record = findShared(f[3], id)
@@ -1749,6 +988,13 @@ local function applyRecord(f, sender)
     local itemID = tonumber(f[7])
     record.rev, record.at, record.itemID, record.npc = rev, at, itemID, tonumber(f[8])
     record.item = (itemID and select(2, GetItemInfo(itemID))) or record.item or ("item:" .. (itemID or 0))
+    -- Not cached yet (item 50667 in the raid of 2026-10-19): ask the server;
+    -- the history shows the link once it has arrived.
+    if itemID and string.sub(record.item, 1, 5) == "item:" then
+        scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+        scanTip:SetHyperlink("item:" .. itemID)
+        scanTip:Hide()
+    end
     record.recipient, record.state, record.confirmed = f[9], STATES[f[10]] and f[10] or "manual", f[11] == "1"
     record.spec = (f[12] == "ms" or f[12] == "os" or f[12] == "boe") and f[12] or nil
     record.roll, record.low, record.high = tonumber(f[13]), tonumber(f[14]), tonumber(f[15])
@@ -1758,11 +1004,12 @@ local function applyRecord(f, sender)
     -- Our own awards coming back (after a crash): never reuse their numbers.
     if lower(f[3]) == lower(playerName()) then db.nextID = math.max(db.nextID, id) end
     db.startedAt = math.min(db.startedAt or at, at)
-    updateRows()
+    ui.refresh()
 end
 
 local function applyLog(f, sender)
     local id, part, total = tonumber(f[4]), tonumber(f[5]), tonumber(f[6])
+    if ns.trusts and not ns.trusts(sender) then return end
     if not (id and part and total) or total > 40 or not acceptSession(f[2], sender) then return end
     local record = findShared(f[3], id)
     if not record then return end
@@ -1786,7 +1033,7 @@ local function applyLog(f, sender)
         end
     end
     record.rollLog, record.logParts = log, nil
-    updateRows()
+    ui.refresh()
 end
 
 -- openSnapshot lists the items still waiting in the roll list for wishlist
@@ -1820,6 +1067,7 @@ end
 -- master looter whose client crashed gets the ledger back.
 local function answerSync(asker)
     shareOpenItems(true)
+    for _, fix in pairs(ensureDatabase().tallyAdjust or {}) do queue(roster.encodeAdjust(fix)) end
     for i = table.getn(ensureDatabase().history), 1, -1 do
         local record = ensureDatabase().history[i]
         local origin = lower(record.origin or playerName())
@@ -1844,6 +1092,7 @@ local function onAddonMessage(prefix, message, channel, sender)
     if prefix ~= SYNC_PREFIX or type(message) ~= "string" or not sender or isPlayer(sender) then return end
     if channel ~= "RAID" and channel ~= "PARTY" or not inGroup(sender) then return end
     local f = split(message)
+    if ns.onMessage and ns.onMessage(f, sender) then return end   -- hellos, editors (Access.lua)
     if f[1] == "A" then
         applyRecord(f, sender)
     elseif f[1] == "L" then
@@ -1851,71 +1100,72 @@ local function onAddonMessage(prefix, message, channel, sender)
     elseif f[1] == "Q" and lower(f[3] or "") == lower(sender) then
         answerSync(sender)
     elseif f[1] == "W" then
-        if applyWishlist(f, sender) then updateRows() end
+        if applyWishlist(f, sender) then ui.refresh() end
+    elseif f[1] == "T" then
+        roster.applyAdjust(f, sender)
     end
 end
 
-local panes = { rollPane, detailPane, historyPane }
+---------------------------------------------------------------------------
+-- Tally corrections (UI feedback 2026-10-19): editors add or take items per
+-- player on top of the awards, e.g. for loot from before the ledger ran. Four
+-- counters: items main/off spec (ms, os), tokens main/off spec (tms, tos).
+-- Shared as "T;session;name;ms;os;tms;tos;changedAt", reset by a new raid,
+-- never in the website export.
+---------------------------------------------------------------------------
+local ADJUST_KEYS = { "ms", "os", "tms", "tos" }
 
-local function refreshExport(focus)
+function roster.encodeAdjust(fix)
+    return table.concat({ "T", currentSession(), field(fix.name), fix.ms or 0, fix.os or 0, fix.tms or 0, fix.tos or 0,
+        fix.at or 0 }, ";")
+end
+
+function roster.adjustments()
     local db = ensureDatabase()
-    if not db.raidID then
-        exportText.generated = ""
-        exportText:SetText("")
-        status:SetText(L["Enter the website's raid ID to build the export."])
-        return
-    end
-    exportText.generated = buildExport(db.raidID, playerName(), db.startedAt, time(), db.history)
-    exportText:SetText(exportText.generated)
-    if focus then
-        exportText:SetFocus()
-        exportText:HighlightText()
-    end
-    status:SetText(L["Export selected: press Ctrl+C and paste it into the raid website's loot import."])
+    db.tallyAdjust = db.tallyAdjust or {}
+    return db.tallyAdjust
 end
 
--- Overlays (the export, Raid.lua's raid setup) replace the three panes; only
--- one is shown at a time.
-local overlays = { exportPanel }
-local function showOverlay(panel)
-    for _, overlay in ipairs(overlays) do
-        if overlay ~= panel then overlay:Hide() end
-    end
-    for _, pane in ipairs(panes) do
-        if panel then pane:Hide() else pane:Show() end
-    end
-    if panel then
-        Ledger:Show()
-        panel:Show()
-    end
-end
-
-local function showExport(show)
-    showOverlay(show and exportPanel or nil)
-    if show then
-        local db = ensureDatabase()
-        raidBox:SetText(db.raidID and tostring(db.raidID) or "")
-        refreshExport(true)
+-- roster.adjustTally changes one counter of `name` by `delta` (or sets all to
+-- 0 with counter "reset").
+function roster.adjustTally(name, counter, delta)
+    if roster.denied() then return false end
+    name = field(trim(name))
+    if name == "" then return false end
+    local all = roster.adjustments()
+    local fix = all[lower(name)] or { name = name, ms = 0, os = 0, tms = 0, tos = 0 }
+    if counter == "reset" then
+        for _, key in ipairs(ADJUST_KEYS) do fix[key] = 0 end
     else
-        exportText:ClearFocus()
-        updateRows()
+        fix[counter] = (fix[counter] or 0) + delta
     end
+    fix.at = math.max(time(), (fix.at or 0) + 1)
+    all[lower(name)] = fix
+    queue(roster.encodeAdjust(fix))
+    ui.refresh()
+    return true
+end
+
+function roster.applyAdjust(f, sender)
+    if ns.trusts and not ns.trusts(sender) then return end
+    local at = tonumber(f[8])
+    if not at or (f[3] or "") == "" or not acceptSession(f[2], sender) then return end
+    local all = roster.adjustments()
+    local key = lower(f[3])
+    if all[key] and (all[key].at or 0) >= at then return end
+    all[key] = { name = f[3], ms = tonumber(f[4]) or 0, os = tonumber(f[5]) or 0, tms = tonumber(f[6]) or 0,
+        tos = tonumber(f[7]) or 0, at = at }
+    ui.refresh()
+end
+
+function ns.resetTallyAdjustments()
+    ensureDatabase().tallyAdjust = {}
 end
 
 local function setRaidID(value)
-    local db = ensureDatabase()
-    db.raidID = tonumber(value)
-    if exportPanel:IsShown() then refreshExport() end
+    ensureDatabase().raidID = tonumber(value)
+    ui.refresh()
 end
-
-raidBox:SetScript("OnTextChanged", function(self)
-    local value = tonumber(self:GetText())
-    if value ~= ensureDatabase().raidID then setRaidID(value) end
-end)
-raidBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-raidBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-exportButton:SetScript("OnClick", function() showExport(not exportPanel:IsShown()) end)
-backButton:SetScript("OnClick", function() showExport(false) end)
 
 -- A new raid starts an empty ledger, so its loot is never exported under the
 -- previous raid's ID. Award IDs keep counting up.
@@ -1926,11 +1176,9 @@ local function startNewRaid()
     db.raidID = nil
     db.session = nil   -- the next award starts a new shared ledger
     editing = nil
-    historyOffset = 0
-    raidBox:SetText("")
-    if exportPanel:IsShown() then refreshExport() end
+    ns.resetTallyAdjustments()
     say(L["new raid: the award ledger is empty."])
-    updateRows()
+    ui.refresh()
 end
 
 StaticPopupDialogs["RAIDLEDGER_NEW_RAID"] = {
@@ -1942,8 +1190,6 @@ StaticPopupDialogs["RAIDLEDGER_NEW_RAID"] = {
     whileDead = 1,
     hideOnEscape = 1,
 }
-newRaidButton:SetScript("OnClick", function() StaticPopup_Show("RAIDLEDGER_NEW_RAID") end)
-clearButton:SetScript("OnClick", function() StaticPopup_Show("RAIDLEDGER_NEW_RAID") end)
 
 local function rollPattern()
     return patternFromFormat(RANDOM_ROLL_RESULT or "%s rolls %d (%d-%d)")
@@ -1978,20 +1224,22 @@ local function recordRoll(message)
         kind = kind, low = lo, high = hi })
     if note then return end
     table.insert(entry.rolls, { name = name, value = value, kind = kind, low = lo, high = hi,
-        tally = tallyOf(tallies(isToken(entry.item)), name, kind) })
+        tally = tallyOf(tallies(isToken(entry.item), entry), name, kind) })
     table.sort(entry.rolls, ranksAbove)
-    updateRows()
+    ui.refresh()
 end
 
 -- startSelectedRoll starts a roll for the selected item; with `free` a free
 -- BoE roll for any character.
 local function startSelectedRoll(free)
+    if roster.denied() then return end
     local entry = selectedEntry()
     if not entry then
-        status:SetText(L["Select a master-loot item before starting a roll."])
+        ui.status(L["Select a master-loot item before starting a roll."])
         return
     end
     entry.free = free and true or nil
+    entry.nobody = nil
     entry.rolls = {}
     entry.rollLog = {}
     entry.round = 1
@@ -2005,14 +1253,14 @@ local function startSelectedRoll(free)
     if free then
         -- Not shared: wishlists only prompt for main- and off-spec rolls.
         announce(string.format(L["[Loot] %s - free BoE roll for any character! /rnd 100, %d seconds."], entry.item, seconds))
-        status:SetText(string.format(L["%d-second free BoE roll started."], seconds))
+        ui.status(string.format(L["%d-second free BoE roll started."], seconds))
     else
         announce(string.format(L["[Loot] %s - /rnd now! %d seconds. /rnd 100 main spec (enhanced: 1+X to 100+X, X up to 50), /rnd 99 off spec."],
             entry.item, seconds))
         shareRollStart(entry, seconds)
-        status:SetText(string.format(L["%d-second raid roll started."], seconds))
+        ui.status(string.format(L["%d-second raid roll started."], seconds))
     end
-    updateRows()
+    ui.refresh()
 end
 
 -- startFreeRoll posts an item again for any character (bind on equip): the
@@ -2051,7 +1299,8 @@ end
 local function finishRoll(entry)
     entry.endsAt = nil
     if activeRollCount(entry) == 0 then
-        announce(string.format(L["[Loot] %s - no valid rolls."], entry.item))
+        entry.nobody = true
+        announce(string.format(L["[Loot] %s - nobody wanted it."], entry.item))
         -- Nobody needs a BoE item for this character: offer it to everyone.
         if not entry.free and isBindOnEquip(entry.item) then
             local dialog = StaticPopup_Show("RAIDLEDGER_FREE_ROLL", entry.item, nil, entry)
@@ -2064,9 +1313,10 @@ local function finishRoll(entry)
         return
     end
     -- Tallies may have changed during the roll (other awards): rank again.
-    local counts = tallies(isToken(entry.item))   -- tokens rank by the token tally
+    local counts = tallies(isToken(entry.item), entry)   -- tokens rank by the token tally
     for _, roll in ipairs(entry.rolls) do roll.tally = tallyOf(counts, roll.name, roll.kind) end
     table.sort(entry.rolls, ranksAbove)
+    if (entry.count or 1) > 1 and not entry.free then return roster.finishBundle(entry) end
     local best = entry.rolls[1]
     local top = best.value
     local tied = {}
@@ -2076,30 +1326,75 @@ local function finishRoll(entry)
         end
     end
     if table.getn(tied) > 1 then
-        table.sort(tied)
-        entry.tieBreak = {}
-        for _, name in ipairs(tied) do entry.tieBreak[name] = true end
-        entry.rolls = {}
-        entry.round = (entry.round or 1) + 1
-        local seconds = tieSeconds()
-        entry.endsAt = GetTime() + seconds
-        entry.startedAt = GetTime()
-        entry.reminders = reminders(seconds)
-        announce(string.format(L["[Loot] %s - tie between %s (%d)! %s: /rnd again, %d seconds."],
-            entry.item, joinNames(tied), top, table.concat(tied, ", "), seconds))
-        shareRollStart(entry, seconds, tied)
+        roster.tieBreak(entry, tied, top)
         return
     end
     entry.winner = entry.rolls[1]
     entry.tieBreak = nil
-    if selectedEntry() == entry and not editing then recipientBox:SetText(entry.winner.name) end
+    ui.suggest(entry)
     if entry.free then
         announce(string.format(L["[Loot] %s - free BoE roll won by %s (%d)."], entry.item, best.name, best.value))
         return
     end
     announce(string.format(L["[Loot] %s won by %s (%d) - %s%s, %s so far."], entry.item, best.name, best.value,
         SPEC_NAMES[best.kind], best.low and best.low > 1 and (" " .. best.low .. "-" .. best.high) or "",
-        itemCount(best.tally or 0, isToken(entry.item))))
+        ns.specCounts(counts, best.name, isToken(entry.item))))
+end
+
+-- roster.tieBreak starts a tie-break in which only the `tied` players roll.
+function roster.tieBreak(entry, tied, value)
+    table.sort(tied)
+    entry.tieBreak = {}
+    for _, name in ipairs(tied) do entry.tieBreak[name] = true end
+    entry.rolls = {}
+    entry.round = (entry.round or 1) + 1
+    local seconds = tieSeconds()
+    entry.endsAt = GetTime() + seconds
+    entry.startedAt = GetTime()
+    entry.reminders = reminders(seconds)
+    announce(string.format(L["[Loot] %s - tie between %s (%d)! %s: /rnd again, %d seconds."],
+        entry.item, joinNames(tied), value, table.concat(tied, ", "), seconds))
+    shareRollStart(entry, seconds, tied)
+end
+
+-- roster.finishBundle decides a bundle of identical tokens (entry.count
+-- copies, raid feedback 2026-10-19): the best rolls win one copy each. A tie
+-- matters only where it decides the last copy: the players above it keep
+-- their copies (entry.fixed) while the tied players roll for the rest.
+-- Players who already received a copy (entry.awarded) are left out.
+function roster.finishBundle(entry)
+    local function same(a, b) return a.kind == b.kind and a.tally == b.tally and a.value == b.value end
+    local fixed, taken = entry.fixed or {}, {}
+    for _, r in ipairs(fixed) do taken[string.lower(r.name)] = true end
+    for name in pairs(entry.awarded or {}) do taken[name] = true end
+    local rolls = {}
+    for _, r in ipairs(entry.rolls) do
+        if not taken[string.lower(r.name)] then table.insert(rolls, r) end
+    end
+    local need = entry.count - table.getn(fixed)
+    local cut, after = rolls[need], rolls[need + 1]
+    if need > 0 and cut and after and same(cut, after) then
+        local tied = {}
+        for _, r in ipairs(rolls) do
+            if same(r, cut) then table.insert(tied, r.name)
+            elseif ranksAbove(r, cut) then table.insert(fixed, r) end
+        end
+        entry.fixed = fixed
+        roster.tieBreak(entry, tied, cut.value)
+        return
+    end
+    local winners = {}
+    for _, r in ipairs(fixed) do table.insert(winners, r) end
+    for i = 1, math.min(math.max(need, 0), table.getn(rolls)) do table.insert(winners, rolls[i]) end
+    entry.fixed, entry.tieBreak = nil, nil
+    entry.winners, entry.winner = winners, winners[1]
+    ui.suggest(entry)
+    local names = {}
+    for _, r in ipairs(winners) do table.insert(names, string.format("%s (%d)", r.name, r.value)) end
+    announce(string.format(L["[Loot] %dx %s won by %s."], entry.count, entry.item, table.concat(names, ", ")))
+    if table.getn(winners) < entry.count then
+        announce(string.format(L["[Loot] %s - %d left: nobody wanted it."], entry.item, entry.count - table.getn(winners)))
+    end
 end
 
 -- Passes and recounts work on the roll log: a struck roll gets a note, a
@@ -2116,7 +1411,7 @@ function roster.counted(entry, name)
 end
 
 function roster.rank(entry, round)
-    local counts = tallies(isToken(entry.item))
+    local counts = tallies(isToken(entry.item), entry)
     local rolls = {}
     for _, r in ipairs(entry.rollLog or {}) do
         if r.kind and not r.note and (r.round or 1) == round then
@@ -2133,10 +1428,14 @@ function roster.decide(entry)
     for _, r in ipairs(entry.rollLog or {}) do
         if r.kind and not r.note and (r.round or 1) > round then round = r.round or 1 end
     end
-    if entry.winner and selectedEntry() == entry and not editing and recipientBox:GetText() == entry.winner.name then
-        recipientBox:SetText("")
+    entry.winner, entry.winners, entry.tieBreak, entry.bundleLog = nil, nil, nil, nil
+    -- A bundle keeps the copies decided before a tie-break, unless their
+    -- player no longer has a counted roll.
+    if entry.fixed then
+        for i = table.getn(entry.fixed), 1, -1 do
+            if not roster.counted(entry, entry.fixed[i].name)[1] then table.remove(entry.fixed, i) end
+        end
     end
-    entry.winner, entry.tieBreak = nil, nil
     entry.rolls = roster.rank(entry, round)
     finishRoll(entry)
 end
@@ -2178,9 +1477,12 @@ end
 
 -- roster.apply: how = "pass", "none" (strike the roll), "ms", "os" or "enh"
 -- with `points` (0-50), for `name`'s roll on the selected item, or on the
--- award whose roll log is shown.
-function roster.apply(name, how, points)
-    if editing then return roster.applyAward(editing, name, how, points) end
+-- award `record` (its roll log in the awards tab). Without a record, the
+-- award shown in the awards tab counts when that tab is open (chat commands).
+function roster.apply(name, how, points, record)
+    if roster.denied() then return end
+    record = record or (editing and ui.tab and ui.tab() == "awards" and editing)
+    if record then return roster.applyAward(record, name, how, points) end
     local entry = selectedEntry()
     local logs = entry and roster.counted(entry, name or "") or {}
     if not logs[1] then
@@ -2208,7 +1510,7 @@ function roster.apply(name, how, points)
     else
         roster.decide(entry)
     end
-    updateRows()
+    ui.refresh()
 end
 
 -- roster.sortLog orders a roll log like sortedRollLog: by round, counted rolls
@@ -2259,11 +1561,10 @@ function roster.applyAward(record, name, how, points)
     roster.sortLog(record.rollLog)
     local best, second = rolls[1], rolls[2]
     if not best then
-        status:SetText(string.format(L["Award #%d: no valid roll is left; decide who gets it (DE, BANK or another recipient)."], record.id))
+        ui.status(string.format(L["Award #%d: no valid roll is left; decide who gets it (DE, BANK or another recipient)."], record.id))
     elseif second and second.kind == best.kind and second.tally == best.tally and second.value == best.value then
-        status:SetText(string.format(L["Award #%d: %s and %s tie; decide who gets it."], record.id, best.name, second.name))
+        ui.status(string.format(L["Award #%d: %s and %s tie; decide who gets it."], record.id, best.name, second.name))
     elseif lower(best.name) ~= lower(record.recipient or "") then
-        if editing == record then recipientBox:SetText(best.name) end
         setRecipient(record.id, best.name, best)
         return
     else
@@ -2271,14 +1572,14 @@ function roster.applyAward(record, name, how, points)
         record.roll, record.low, record.high = best.value, best.low, best.high
     end
     publish(record)
-    updateRows()
+    ui.refresh()
 end
 
-function roster.askPoints(name)
-    local entry = editing or selectedEntry()
+function roster.askPoints(name, record)
+    local entry = record or selectedEntry()
     local r = entry and roster.counted(entry, name or "")[1]
     roster.points = (r and r.kind == "ms" and r.low and r.low > 1) and (r.low - 1) or 0
-    StaticPopup_Show("RAIDLEDGER_POINTS", name, nil, name)
+    StaticPopup_Show("RAIDLEDGER_POINTS", name, nil, { name = name, record = record })
 end
 
 StaticPopupDialogs["RAIDLEDGER_POINTS"] = {
@@ -2294,11 +1595,11 @@ StaticPopupDialogs["RAIDLEDGER_POINTS"] = {
             box:HighlightText()
         end
     end,
-    OnAccept = function(self, name)
+    OnAccept = function(self, data)
         local box = _G[self:GetName() .. "EditBox"]
         local points = tonumber(box and box:GetText() or "")
         if points and points >= 0 and points <= 50 and points == math.floor(points) then
-            roster.apply(name, "enh", points)
+            roster.apply(data.name, "enh", points, data.record)
         else
             say(L["usage: /ledger count <name> ms|os|none|enh <0-50>"])
         end
@@ -2322,7 +1623,7 @@ local function updateRollTimers()
             local remaining = entry.endsAt - GetTime()
             if remaining <= 0 then
                 finishRoll(entry)
-                updateRows()
+                ui.refresh()
             else
                 -- One message even if a slow frame passed both reminders.
                 local left
@@ -2334,7 +1635,7 @@ local function updateRollTimers()
         end
     end
     -- Keep the countdown in the window ticking between rolls.
-    if running and Ledger:IsShown() then updateSelection() end
+    if running and ui.shown() then ui.refresh() end
 end
 
 -- startLaterRoll rolls an open award (parked, or held without a roll): the
@@ -2352,8 +1653,8 @@ local function startLaterRoll(record)
     local entry = { item = record.item, npc = record.npc, rolls = {}, record = record, later = true }
     table.insert(active, 1, entry)
     while table.getn(active) > MAX_ACTIVE do table.remove(active) end
-    selected, editing = entry, nil
-    recipientBox:SetText("")
+    selected = entry
+    ui.show("loot")
     startSelectedRoll()
 end
 
@@ -2363,6 +1664,7 @@ end
 -- new held award is recorded first. The roll then runs like any later roll,
 -- and the winner gets the item by trade.
 local function mayStartRolls()
+    if ns.hasEditors and ns.hasEditors() then return ns.mayEdit() end   -- the editor list decides
     local raid, party = GetNumRaidMembers() or 0, GetNumPartyMembers() or 0
     if raid == 0 and party == 0 then return true end
     local method, partyMaster, raidMaster = GetLootMethod()
@@ -2400,15 +1702,15 @@ local function rollBagItem(link)
         return
     end
     if not mayStartRolls() then
-        say(L["only the master looter or the raid lead can start rolls."])
+        say(ns.hasEditors and ns.hasEditors() and ns.deniedText() or L["only the master looter or the raid lead can start rolls."])
         return
     end
-    Ledger:Show()
+    ui.show("loot")
     for _, entry in ipairs(active) do
         if entry.later and entry.record and entry.record.itemID == itemID and entry.endsAt and not entry.winner then
             selected, editing = entry, nil
-            updateRows()
-            status:SetText(string.format(L["%s is already being rolled."], entry.item))
+            ui.refresh()
+            ui.status(string.format(L["%s is already being rolled."], entry.item))
             return
         end
     end
@@ -2459,159 +1761,136 @@ finishLaterRoll = function(entry, recipient)
     if selected == entry then selected = nil end
     publish(record, true)
     announceAward({ item = record.item, recipient = record.winner, spec = record.spec }, how)
-    recipientBox:SetText("")
-    status:SetText(string.format(L["Award #%d goes to %s (%s)."], record.id, record.winner, how))
-    updateRows()
+    ui.status(string.format(L["Award #%d goes to %s (%s)."], record.id, record.winner, how))
+    ui.refresh()
 end
 
--- parkSelected hands the selected loot to a raider (or keeps it) to be rolled
--- later, or marks a recorded award as parked with its current holder.
-local function parkSelected()
-    local holder = trim(recipientBox:GetText())
-    if editing then
-        if isOpenAward(editing) then
-            startLaterRoll(editing)
-            return
-        end
-        if editing.state == "deleted" then
-            status:SetText(L["Restore the award before parking it."])
-            return
-        end
-        editing.recipient = field(holder ~= "" and holder or editing.recipient)
-        editing.state, editing.winner, editing.spec, editing.roll = "parked", nil, nil, nil
-        editing.low, editing.high, editing.confirmed = nil, nil, true
-        publish(editing)
-        announceAward(editing)
-        status:SetText(string.format(L["Award #%d is open, held by %s until it is rolled."], editing.id, editing.recipient))
-        editing = nil
-        recipientBox:SetText("")
-        updateRows()
-        return
-    end
-    local entry = selectedEntry()
-    if not entry or entry.later then
-        status:SetText(L["Select a loot item to park."])
-        return
-    end
-    if holder == "" then holder = playerName() end
-    local slot = lootSlotOf(entry)
-    if slot then
-        local index = candidateIndex(holder)
-        if not index then
-            status:SetText(string.format(L["%s cannot receive this item (not a master-loot candidate)."], holder))
-            return
-        end
-        parkSlots[slot] = "parked"
-        recipientBox:SetText("")
-        GiveMasterLoot(slot, index)
-        return
-    end
-    local record = recordAward(entry, holder, "parked", true)
-    announceAward(record)
-    recipientBox:SetText("")
-    status:SetText(string.format(L["Award #%d is open, held by %s until it is rolled."], record.id, holder))
-    updateRows()
-end
-park:SetScript("OnClick", parkSelected)
+-- Actions on loot and awards. The window passes the name from its box; every
+-- action returns true when it did something, so the window can clear the box.
 
--- giveAway hands the selected item (or marks the selected award) for
--- disenchanting or the guild bank. The holder is the name in the box, else you.
-local function giveAway(state)
-    local holder = trim(recipientBox:GetText())
-    if editing then
-        editing.recipient = field(holder ~= "" and holder or editing.recipient)
-        editing.state, editing.winner, editing.confirmed = state, nil, true
-        editing.roll, editing.spec, editing.low, editing.high = nil, nil, nil, nil
-        publish(editing)
-        announceAward(editing)
-        status:SetText(string.format(L["Award #%d: %s (%s)."], editing.id, stateLabels[state], editing.recipient))
-        editing = nil
-        recipientBox:SetText("")
-        updateRows()
-        return
-    end
+-- handOut gives the selected loot item to `holder` as `state` ("given",
+-- "parked", "disenchanted", "bank"): through the master-loot window when the
+-- item is still in it (the GiveMasterLoot hook records it), else recorded by hand.
+local function handOut(holder, state)
     local entry = selectedEntry()
-    if not entry or entry.later then
-        status:SetText(L["Select a loot item first."])
-        return
-    end
-    if holder == "" then holder = playerName() end
-    local slot = lootSlotOf(entry)
-    if slot then
-        local index = candidateIndex(holder)
-        if not index then
-            status:SetText(string.format(L["%s cannot receive this item (not a master-loot candidate)."], holder))
-            return
-        end
-        parkSlots[slot] = state
-        recipientBox:SetText("")
-        GiveMasterLoot(slot, index)
-        return
-    end
-    local record = recordAward(entry, holder, state, true)
-    announceAward(record)
-    recipientBox:SetText("")
-    status:SetText(string.format(L["Award #%d: %s (%s)."], record.id, stateLabels[state], holder))
-    updateRows()
-end
-disenchantButton:SetScript("OnClick", function() giveAway("disenchanted") end)
-bankButton:SetScript("OnClick", function() giveAway("bank") end)
-for button, tip in pairs({ [disenchantButton] = L["Disenchant: give it to the name in the box (or keep it); counts for nobody"],
-    [bankButton] = L["Guild bank: give it to the name in the box (or keep it); counts for nobody"] }) do
-    button:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText(tip, 1, 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
-end
-
-award:SetScript("OnClick", function()
-    local recipient = trim(recipientBox:GetText())
-    if editing then
-        if recipient == "" then
-            status:SetText(L["Enter the new recipient's name."])
-            return
-        end
-        if setRecipient(editing.id, recipient) then
-            editing = nil
-            recipientBox:SetText("")
-            updateRows()
-        end
-        return
-    end
-    local entry = selectedEntry()
-    if not entry then
-        status:SetText(L["Select a loot roll before recording an award."])
-        return
-    end
-    if recipient == "" then
-        status:SetText(L["Choose or enter a recipient name."])
-        return
+    if not entry or (entry.later and state ~= "given") then
+        ui.status(L["Select a loot item first."])
+        return false
     end
     if entry.later then
-        finishLaterRoll(entry, recipient)
-        return
+        finishLaterRoll(entry, holder)
+        return true
     end
-    -- With the item still in the master-loot window, hand it out for real; the
-    -- GiveMasterLoot hook then records the award.
     local slot = lootSlotOf(entry)
     if slot then
-        local index = candidateIndex(recipient)
+        local index = candidateIndex(holder)
         if not index then
-            status:SetText(string.format(L["%s cannot receive this item (not a master-loot candidate)."], recipient))
-            return
+            ui.status(string.format(L["%s cannot receive this item (not a master-loot candidate)."], holder))
+            return false
         end
-        recipientBox:SetText("")
+        if state ~= "given" then parkSlots[slot] = state end
         GiveMasterLoot(slot, index)
-        return
+        return true
     end
-    local record = recordAward(entry, recipient, "manual", true)
+    local record = recordAward(entry, holder, state == "given" and "manual" or state, true)
     announceAward(record)
-    recipientBox:SetText("")
-    status:SetText(string.format(L["Award #%d recorded for %s."], record.id, recipient))
-    updateRows()
-end)
+    if state == "parked" then
+        ui.status(string.format(L["Award #%d is open, held by %s until it is rolled."], record.id, holder))
+    elseif NO_TALLY[state] then
+        ui.status(string.format(L["Award #%d: %s (%s)."], record.id, stateLabels[state], holder))
+    else
+        ui.status(string.format(L["Award #%d recorded for %s."], record.id, holder))
+    end
+    ui.suggest(entry)   -- a bundle's next winner
+    ui.refresh()
+    return true
+end
+
+-- roster.giveSelected: GIVE + RECORD for the selected loot item.
+function roster.giveSelected(name)
+    if roster.denied() then return false end
+    name = trim(name)
+    if not selectedEntry() then
+        ui.status(L["Select a loot roll before recording an award."])
+        return false
+    end
+    if name == "" then
+        ui.status(L["Choose or enter a recipient name."])
+        return false
+    end
+    return handOut(name, "given")
+end
+
+-- roster.parkSelected / roster.giveAwaySelected: PARK, DE and BANK for the
+-- selected loot item; without a name the item stays with you.
+function roster.parkSelected(name)
+    if roster.denied() then return false end
+    name = trim(name)
+    return handOut(name ~= "" and name or playerName(), "parked")
+end
+
+function roster.giveAwaySelected(state, name)
+    if roster.denied() then return false end
+    name = trim(name)
+    return handOut(name ~= "" and name or playerName(), state)
+end
+
+-- roster.parkRecord marks a recorded award as parked with `name` (else its
+-- current holder) until it is rolled; an open award is rolled instead.
+function roster.parkRecord(record, name)
+    if roster.denied() then return false end
+    if isOpenAward(record) then
+        startLaterRoll(record)
+        return true
+    end
+    if record.state == "deleted" then
+        ui.status(L["Restore the award before parking it."])
+        return false
+    end
+    name = trim(name)
+    record.recipient = field(name ~= "" and name or record.recipient)
+    record.state, record.winner, record.spec, record.roll = "parked", nil, nil, nil
+    record.low, record.high, record.confirmed = nil, nil, true
+    publish(record)
+    announceAward(record)
+    ui.status(string.format(L["Award #%d is open, held by %s until it is rolled."], record.id, record.recipient))
+    ui.refresh()
+    return true
+end
+
+-- roster.giveAwayRecord marks a recorded award for disenchanting or the bank.
+function roster.giveAwayRecord(record, state, name)
+    if roster.denied() then return false end
+    name = trim(name)
+    record.recipient = field(name ~= "" and name or record.recipient)
+    record.state, record.winner, record.confirmed = state, nil, true
+    record.roll, record.spec, record.low, record.high = nil, nil, nil, nil
+    publish(record)
+    announceAward(record)
+    ui.status(string.format(L["Award #%d: %s (%s)."], record.id, stateLabels[state], record.recipient))
+    ui.refresh()
+    return true
+end
+
+-- roster.changeRecipient gives a recorded (or removed) award to `name`.
+function roster.changeRecipient(record, name)
+    name = trim(name)
+    if name == "" then
+        ui.status(L["Enter the new recipient's name."])
+        return false
+    end
+    return setRecipient(record.id, name) and true or false
+end
+
+-- roster.setSpec moves an award to the main- or off-spec tally, or out of it.
+function roster.setSpec(record, spec)
+    if roster.denied() then return false end
+    record.spec = (spec == "ms" or spec == "os") and spec or nil
+    publish(record)
+    ui.status(string.format(L["award #%d counts for %s."], record.id, record.spec and SPEC_NAMES[record.spec] or L["no tally"]))
+    ui.refresh()
+    return true
+end
 
 Ledger:RegisterEvent("PLAYER_LOGIN")
 Ledger:RegisterEvent("LOOT_OPENED")
@@ -2638,41 +1917,18 @@ Ledger:SetScript("OnEvent", function(self, event, ...)
     elseif event == "PLAYER_LOGIN" then
         ensureDatabase()
         syncAt = GetTime() + 8
-        updateRows()
-        if ForgeTestBridge and ForgeTestBridge.RegisterFrame then
-            ForgeTestBridge:RegisterFrame("RaidLedgerFrame", self)
-            ForgeTestBridge:RegisterFrame("RaidLedgerItem", itemDetail)
-            ForgeTestBridge:RegisterFrame("RaidLedgerAward", award)
-            ForgeTestBridge:RegisterFrame("RaidLedgerRecipient", recipientBox)
-            ForgeTestBridge:RegisterFrame("RaidLedgerRollDetail", rollDetail)
-            ForgeTestBridge:RegisterFrame("RaidLedgerPark", park)
-            ForgeTestBridge:RegisterFrame("RaidLedgerParkText", parkText)
-            ForgeTestBridge:RegisterFrame("RaidLedgerDisenchant", disenchantButton)
-            ForgeTestBridge:RegisterFrame("RaidLedgerBank", bankButton)
-            ForgeTestBridge:RegisterFrame("RaidLedgerHistory1", historyLines[1])
-            ForgeTestBridge:RegisterFrame("RaidLedgerExportButton", exportButton)
-            ForgeTestBridge:RegisterFrame("RaidLedgerExportText", exportText)
-            ForgeTestBridge:RegisterFrame("RaidLedgerRollHeading", rollHeading)
-            for i = 1, 3 do
-                ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i, rows[i])
-                ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i .. "Count", rows[i].count)
-                ForgeTestBridge:RegisterFrame("RaidLedgerRoll" .. i .. "Holder", rows[i].holder)
-            end
-            for i = 1, 4 do ForgeTestBridge:RegisterFrame("RaidLedgerMember" .. i, rosterButtons[i]) end
-            ForgeTestBridge:RegisterFrame("RaidLedgerAllMembers", roster.all)
-            ForgeTestBridge:RegisterFrame("RaidLedgerMembers", roster.pane)
-        end
+        ui.refresh()
     elseif event == "LOOT_OPENED" or event == "LOOT_READY" then
         captureMasterLoot()
-        updateRows()
+        ui.refresh()
     elseif event == "LOOT_CLOSED" then
         lootSlots = {}
         windowKey, windowNpc = nil, nil
-        updateRows()
+        ui.refresh()
     elseif event == "CHAT_MSG_SYSTEM" then
         recordRoll(...)
     elseif event == "CHAT_MSG_LOOT" then
-        onLootMessage(...)
+        if not roster.groupLoot(...) then onLootMessage(...) end
     elseif event == "TRADE_SHOW" then
         trade = { partner = UnitName("NPC"), items = {} }
     elseif event == "TRADE_PLAYER_ITEM_CHANGED" or event == "TRADE_ACCEPT_UPDATE" then
@@ -2688,7 +1944,7 @@ Ledger:SetScript("OnEvent", function(self, event, ...)
         local size = math.max(GetNumRaidMembers() or 0, GetNumPartyMembers() or 0)
         if size > groupSize and not syncAt then wishAskAt = GetTime() + 5 end
         groupSize = size
-        updateRoster()
+        ui.refresh()
     end
 end)
 -- Timers run on a separate, always-shown frame: WoW only fires OnUpdate for
@@ -2721,27 +1977,87 @@ ticker:SetScript("OnUpdate", function(_, elapsed)
     end
 end)
 
--- Raid.lua (invites, groups, attendance; taken over from RaidSync) builds on
--- these.
-ns.Ledger, ns.label, ns.flatButton, ns.makeBackdrop = Ledger, label, flatButton, makeBackdrop
+-- roster.clearActive drops every item from the loot list (not the awards).
+function roster.clearActive()
+    for i = table.getn(active), 1, -1 do table.remove(active, i) end
+    selected = nil
+    drops = {}
+    lootSlots = {}
+    ui.refresh()
+end
+
+-- roster.setTimers sets the roll and tie-break lengths for new rolls (nil keeps
+-- one, "reset" both); false when a length is outside its limits.
+function roster.setTimers(roll, tie)
+    local db = ensureDatabase()
+    if roll == "reset" then
+        db.rollSeconds, db.tieSeconds = nil, nil
+        return true
+    end
+    if (roll and (roll ~= math.floor(roll) or roll < ROLL_LIMITS[1] or roll > ROLL_LIMITS[2]))
+        or (tie and (tie ~= math.floor(tie) or tie < TIE_LIMITS[1] or tie > TIE_LIMITS[2])) then
+        return false
+    end
+    if roll then db.rollSeconds = roll ~= ROLL_SECONDS and roll or nil end
+    if tie then db.tieSeconds = tie ~= TIE_SECONDS and tie or nil end
+    return true
+end
+
+-- Shared helpers for the window (UI.lua and the tabs), Raid.lua and Access.lua.
 ns.ensureDatabase, ns.say, ns.field, ns.trim, ns.lower = ensureDatabase, say, field, trim, lower
 ns.playerName, ns.isPlayer, ns.patternFromFormat = playerName, isPlayer, patternFromFormat
-ns.setStatus = function(text) status:SetText(text) end
-ns.addOverlay = function(panel) table.insert(overlays, panel) end
-ns.showOverlay = function(panel)
-    showOverlay(panel)
-    if not panel then updateRows() end
-end
-ns.headerButton = exportButton
+ns.setStatus = function(text) ui.status(text) end
 ns.raidID = function() return ensureDatabase().raidID end
-ns.setRaidID = function(id)
-    setRaidID(id)
-    raidBox:SetText(id and tostring(id) or "")
-end
+ns.setRaidID = setRaidID
 ns.historyCount = function() return table.getn(ensureDatabase().history) end
-ns.commands = {}
+ns.queue, ns.groupChannel, ns.members = queue, groupChannel, roster.members
+ns.commands = {}   -- chat commands of the other files: /ledger <name> ...
 ns.help = {}
 
+-- ns.core: what the window reads and does. State stays here; the window only
+-- draws it and passes names typed or clicked.
+ns.core = {
+    roster = roster, L = L, SPEC_NAMES = SPEC_NAMES, stateLabels = stateLabels, NO_TALLY = NO_TALLY,
+    ROLL_LIMITS = ROLL_LIMITS, TIE_LIMITS = TIE_LIMITS, MAX_ACTIVE = MAX_ACTIVE, EXPORT_FORMAT = EXPORT_FORMAT,
+    active = function() return active end,
+    history = function() return ensureDatabase().history end,
+    selectedEntry = selectedEntry,
+    editing = function() return editing end,
+    select = function(entry) selected = entry end,
+    edit = function(record) editing = record end,
+    openRecords = openRecords, lootSlotOf = lootSlotOf, activeRollCount = activeRollCount,
+    sortedRollLog = sortedRollLog, tallies = tallies, tallyOf = tallyOf, isToken = isToken,
+    rollLabel = rollLabel, itemCount = itemCount, ranksAbove = ranksAbove, winningRoll = winningRoll,
+    wishersOf = wishersOf, wishOf = wishOf, knowsWishlists = knowsWishlists, summaryLine = summaryLine,
+    isOpenAward = isOpenAward, itemIDFromLink = itemIDFromLink, findRecord = findRecord, isActive = isActive,
+    rollSeconds = rollSeconds, tieSeconds = tieSeconds,
+    startRoll = function(free) if free then startFreeRoll() else startSelectedRoll() end end,
+    startLaterRoll = function(record) if not roster.denied() then startLaterRoll(record) end end,
+    deleteRecord = deleteRecord,
+    newRaid = startNewRaid,
+    -- Shared awards of items this client had not cached yet (item 50667 in the
+    -- raid of 2026-10-19) get their link once the item is known.
+    refreshLinks = function()
+        for _, record in ipairs(ensureDatabase().history) do
+            if string.sub(record.item or "", 1, 5) == "item:" then
+                record.item = select(2, GetItemInfo(record.itemID or 0)) or record.item
+            end
+        end
+    end,
+    sync = function()
+        if not groupChannel() then
+            say(L["not in a group: nothing to sync."])
+            return
+        end
+        requestSync()
+        say(L["asked the group's ledgers for this raid's awards."])
+    end,
+    export = function()
+        local db = ensureDatabase()
+        if not db.raidID then return nil end
+        return buildExport(db.raidID, playerName(), db.startedAt, time(), db.history)
+    end,
+}
 local HELP = {
     L["/ledger - show or hide the ledger"],
     L["/ledger start - start a %d s /rnd roll for the selected item"],
@@ -2767,15 +2083,9 @@ SlashCmdList["RAIDLEDGER"] = function(message)
     local command, rest = trim(message):match("^(%S*)%s*(.-)$")
     command = string.lower(command or "")
     if command == "reset" then
-        Ledger:ClearAllPoints()
-        Ledger:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
-        Ledger:Show()
+        ui.resetPosition()
     elseif command == "clear" then
-        active = {}
-        selected = nil
-        drops = {}
-        lootSlots = {}
-        updateRows()
+        roster.clearActive()
     elseif command == "start" then
         startSelectedRoll()
     elseif command == "roll" then
@@ -2827,6 +2137,7 @@ SlashCmdList["RAIDLEDGER"] = function(message)
         local id = rest:match("^#?(%d+)$")
         if id then deleteRecord(tonumber(id)) else say(L["usage: /ledger del <#>"]) end
     elseif command == "spec" then
+        if roster.denied() then return end
         local id, spec = rest:match("^#?(%d+)%s+(%a+)$")
         spec = spec and string.lower(spec)
         local record = id and findRecord(tonumber(id))
@@ -2836,7 +2147,7 @@ SlashCmdList["RAIDLEDGER"] = function(message)
             record.spec = spec ~= "none" and spec or nil
             publish(record)
             say(string.format(L["award #%d counts for %s."], record.id, record.spec and SPEC_NAMES[record.spec] or L["no tally"]))
-            updateRows()
+            ui.refresh()
         end
     elseif command == "sync" then
         if groupChannel() then
@@ -2849,8 +2160,12 @@ SlashCmdList["RAIDLEDGER"] = function(message)
         -- Two separate lists: items, then tokens.
         for _, tokens in ipairs({ false, true }) do
             local names, counts = {}, tallies(tokens)
+            local known = {}
             for _, record in ipairs(ensureDatabase().history) do
-                local name = (record.state == "held" and record.winner) or record.recipient
+                table.insert(known, (record.state == "held" and record.winner) or record.recipient)
+            end
+            for _, fix in pairs(roster.adjustments()) do table.insert(known, fix.name) end   -- corrected only
+            for _, name in ipairs(known) do
                 if counts[lower(name)] and not names[lower(name)] then
                     names[lower(name)] = true
                     table.insert(names, name)
@@ -2868,17 +2183,16 @@ SlashCmdList["RAIDLEDGER"] = function(message)
         local id = rest:match("^(%d+)$")
         if id then
             setRaidID(id)
-            raidBox:SetText(id)
             say(string.format(L["raid ID %s."], id))
         else
             say(L["usage: /ledger raid <id>"])
         end
     elseif command == "export" then
-        showExport(true)
+        ui.show("export")
     elseif command == "newraid" then
         if string.lower(rest) == "confirm" then startNewRaid() else StaticPopup_Show("RAIDLEDGER_NEW_RAID") end
     elseif command == "" or command == "toggle" then
-        if Ledger:IsShown() then Ledger:Hide() else Ledger:Show() end
+        ui.toggle()
     elseif ns.commands[command] then
         ns.commands[command](rest)
     else
@@ -2887,4 +2201,3 @@ SlashCmdList["RAIDLEDGER"] = function(message)
     end
 end
 
-Ledger:Show()

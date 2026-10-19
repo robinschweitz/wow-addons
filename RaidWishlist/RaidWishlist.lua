@@ -3,26 +3,22 @@
 -- roll (or rolls automatically) when the raid lead's ledger starts a roll on a
 -- wishlisted item, and shows who got what this raid from the ledger's shared
 -- awards (addon messages, prefix FLLedger).
-local _, ns = ...
+local addonName, ns = ...
 local L = ns.L
 local Wishlist = CreateFrame("Frame", "RaidWishlistFrame", UIParent)
 local PREFIX = "FLLedger"
-local WISH_ROWS = 5
-local OPEN_ROWS = 4
-local RAID_ROWS = 5
 local AUTO_DELAY = 1        -- seconds before an automatic roll
 local SPEC_LABELS = { ms = "MS", os = "OS" }
 -- Disenchanted or banked items have a holder but count for nobody.
 local NO_TALLY = { disenchanted = true, bank = true }
 local TOKEN_NAMES = { "Weiheabzeichen" }
 
-local wishRows, openRows, raidRows = {}, {}, {}
-local raidOffset = 0
 local prompt                -- the open roll prompt { key, entry, endsAt }
 local pendingRoll           -- an automatic roll waiting for its delay
 local rolled = {}           -- rollKey:round -> true, so every roll happens once
 local syncAt
 local shareAt               -- when to send this wishlist to the group
+local helloAt               -- when to tell the ledgers this addon's version (HW)
 local WISHES_PER_MESSAGE = 15
 
 local function trim(value)
@@ -353,8 +349,8 @@ local function makeBackdrop(frame, key, alpha)
 end
 
 -- color is a palette key (follows the theme) or a fixed {r, g, b}.
-local function label(parent, template, size, color)
-    local text = parent:CreateFontString(nil, "OVERLAY", template)
+local function label(parent, template, size, color, name)
+    local text = parent:CreateFontString(name, "OVERLAY", template)
     if size then text:SetFont(STANDARD_TEXT_FONT, size) end
     if type(color) == "string" then
         themeColor(text, "text", color)
@@ -376,27 +372,42 @@ local function flatButton(parent, name, caption, width, height)
     return button
 end
 
-local function listRow(parent, index, width, top, tagWidth)
-    local row = CreateFrame("Button", nil, parent)
-    row:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, top - (index - 1) * 17)
-    row:SetWidth(width)
+-- listRow is one line of a list: the item on the left, then `columns`
+-- ({ key, width, color, justify }) on the right; row.columns[key] holds their
+-- texts (named <row name><Key>, e.g. RaidWishlistRaid1Recipient).
+local ROW_WIDTH = 460
+local function listRow(parent, index, columns, name)
+    local row = CreateFrame("Button", name, parent)
+    row:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -28 - (index - 1) * 17)
+    row:SetWidth(ROW_WIDTH)
     row:SetHeight(16)
     row:SetBackdrop({ bgFile = "Interface\\ChatFrame\\ChatFrameBackground" })
     row:SetBackdropColor(0, 0, 0, 0)
+    row.columns = {}
+    local right = -5
+    for i = table.getn(columns), 1, -1 do
+        local column = columns[i]
+        local key = column[1]
+        local text = label(row, "GameFontNormalSmall", 9, column[3] or {1.00, 0.82, 0.30},
+            name .. string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2))
+        text:SetPoint("RIGHT", row, "RIGHT", right, 0)
+        text:SetWidth(column[2])
+        text:SetJustifyH(column[4] or "RIGHT")
+        text:SetWordWrap(false)
+        row.columns[key] = text
+        right = right - column[2] - 8
+    end
     local text = label(row, "GameFontNormalSmall", 10, "text")
     text:SetPoint("LEFT", row, "LEFT", 5, 0)
-    text:SetPoint("RIGHT", row, "RIGHT", -(tagWidth or 96), 0)
+    text:SetPoint("RIGHT", row, "RIGHT", right, 0)
     text:SetJustifyH("LEFT")
     text:SetWordWrap(false)
     row:SetFontString(text)
-    row.right = label(row, "GameFontNormalSmall", 9, {1.00, 0.82, 0.30})
-    row.right:SetPoint("RIGHT", row, "RIGHT", -5, 0)
-    row.right:SetJustifyH("RIGHT")
     return row
 end
 
-Wishlist:SetWidth(470)
-Wishlist:SetHeight(428)
+Wishlist:SetWidth(500)
+Wishlist:SetHeight(440)
 Wishlist:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 Wishlist:SetFrameStrata("DIALOG")
 Wishlist:SetClampedToScreen(true)
@@ -453,61 +464,111 @@ swatch:SetPoint("TOPLEFT", colorButton, "TOPLEFT", 6, -6)
 swatch:SetPoint("BOTTOMRIGHT", colorButton, "BOTTOMRIGHT", -6, 6)
 themeColor(swatch, "texture", "accent")
 
-local wishPane = CreateFrame("Frame", nil, Wishlist)
-wishPane:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -48)
-wishPane:SetWidth(446)
-wishPane:SetHeight(120)
-makeBackdrop(wishPane, "pane", 0.97)
+---------------------------------------------------------------------------
+-- Tabs (2.0, raid feedback 2026-10-20 "you cannot scroll down the loot"):
+-- one full-height list per tab, each scrolling with the mouse wheel, instead
+-- of three short stacked lists.
+---------------------------------------------------------------------------
+local tabBar = CreateFrame("Frame", nil, Wishlist)
+tabBar:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -44)
+tabBar:SetWidth(476)
+tabBar:SetHeight(22)
 
-local wishHeading = label(wishPane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
-wishHeading:SetPoint("TOPLEFT", wishPane, "TOPLEFT", 12, -10)
-wishHeading:SetText(L["MY WISHLIST"])
+local content = CreateFrame("Frame", nil, Wishlist)
+content:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -72)
+content:SetWidth(476)
+content:SetHeight(338)
 
-local wishEmpty = label(wishPane, "GameFontNormalSmall", 11, "dim")
-wishEmpty:SetPoint("CENTER", wishPane, "CENTER", 0, -8)
-wishEmpty:SetJustifyH("CENTER")
-wishEmpty:SetText(L["No wishlist yet.\nCopy the export on the guild website, then IMPORT."])
+local LIST_ROWS = 17
+local lists = {}            -- id -> { pane, rows, offset, count, position, heading, empty, tab }
+local listOrder = {}
+local currentList
 
-for i = 1, WISH_ROWS do wishRows[i] = listRow(wishPane, i, 430, -28) end
+local function addList(id, name, caption, columns, emptyText)
+    local pane = CreateFrame("Frame", name .. "Pane", content)
+    pane:SetAllPoints(content)
+    makeBackdrop(pane, "pane", 0.97)
+    pane:Hide()
+    local list = { id = id, pane = pane, rows = {}, offset = 0, count = 0, caption = caption }
+    list.heading = label(pane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
+    list.heading:SetPoint("TOPLEFT", pane, "TOPLEFT", 12, -10)
+    list.empty = label(pane, "GameFontNormalSmall", 11, "dim")
+    list.empty:SetPoint("CENTER", pane, "CENTER", 0, -8)
+    list.empty:SetJustifyH("CENTER")
+    list.empty:SetText(emptyText)
+    for i = 1, LIST_ROWS do list.rows[i] = listRow(pane, i, columns, name .. i) end
+    list.position = label(pane, "GameFontNormalSmall", 9, "faint", name .. "Position")
+    list.position:SetPoint("BOTTOMRIGHT", pane, "BOTTOMRIGHT", -12, 7)
+    list.position:SetJustifyH("RIGHT")
+    pane:EnableMouseWheel(true)
+    pane:SetScript("OnMouseWheel", function(_, delta)
+        list.offset = math.max(0, math.min(list.offset - delta * 3, list.count - LIST_ROWS))
+        if list.draw then list.draw() end
+    end)
+    local tab = flatButton(tabBar, "RaidWishlistTab" .. id, "", 110, 22)
+    tab:SetScript("OnClick", function() lists.show(id) end)
+    list.tab = tab
+    lists[id] = list
+    table.insert(listOrder, list)
+    return list
+end
 
-local openPane = CreateFrame("Frame", nil, Wishlist)
-openPane:SetPoint("TOPLEFT", wishPane, "BOTTOMLEFT", 0, -8)
-openPane:SetWidth(446)
-openPane:SetHeight(103)
-makeBackdrop(openPane, "pane", 0.97)
+-- place sets how many entries a list has, clamps its offset and says which
+-- of them are shown; the rows then show entries offset+1 .. offset+LIST_ROWS.
+local function place(list, count)
+    list.count = count
+    list.offset = math.max(0, math.min(list.offset, count - LIST_ROWS))
+    if count > 0 then list.empty:Hide() else list.empty:Show() end
+    if count > LIST_ROWS then
+        list.position:SetText(string.format(L["%d-%d / %d  (mouse wheel)"], list.offset + 1,
+            math.min(count, list.offset + LIST_ROWS), count))
+    else
+        list.position:SetText("")
+    end
+end
 
-local openHeading = label(openPane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
-openHeading:SetPoint("TOPLEFT", openPane, "TOPLEFT", 12, -10)
-openHeading:SetText(L["OPEN ITEMS"])
+local function drawTabs()
+    local x = 0
+    for _, list in ipairs(listOrder) do
+        local tab = list.tab
+        tab:SetText(list.caption(list.count))
+        tab:SetWidth(math.max(90, (tab:GetTextWidth() or 60) + 24))
+        tab:ClearAllPoints()
+        tab:SetPoint("TOPLEFT", tabBar, "TOPLEFT", x, 0)
+        x = x + tab:GetWidth() + 4
+        local color = list == currentList and palette.buttonOn or palette.button
+        tab:SetBackdropColor(color[1], color[2], color[3], 0.98)
+    end
+end
 
-local openEmpty = label(openPane, "GameFontNormalSmall", 11, "dim")
-openEmpty:SetPoint("CENTER", openPane, "CENTER", 0, -8)
-openEmpty:SetJustifyH("CENTER")
-openEmpty:SetText(L["No loot is waiting to be rolled."])
+function lists.show(id)
+    local _, char = ensureDatabase()
+    currentList = lists[id] or lists.wish
+    char.tab = currentList.id
+    for _, list in ipairs(listOrder) do
+        if list == currentList then list.pane:Show() else list.pane:Hide() end
+    end
+    drawTabs()
+end
 
-for i = 1, OPEN_ROWS do openRows[i] = listRow(openPane, i, 430, -28, 150) end
+local function counted(caption)
+    return function(count) return count > 0 and string.format("%s (%d)", caption, count) or caption end
+end
 
-local raidPane = CreateFrame("Frame", nil, Wishlist)
-raidPane:SetPoint("TOPLEFT", openPane, "BOTTOMLEFT", 0, -8)
-raidPane:SetWidth(446)
-raidPane:SetHeight(120)
-makeBackdrop(raidPane, "pane", 0.97)
-raidPane:EnableMouseWheel(true)
+local wishList = addList("wish", "RaidWishlistWish", counted(L["WISHLIST"]),
+    { { "note", 140, "dim", "LEFT" }, { "range", 70 } },
+    L["No wishlist yet.\nCopy the export on the guild website, then IMPORT."])
+local openList = addList("open", "RaidWishlistOpen", counted(L["OPEN"]),
+    { { "where", 110, "soft", "LEFT" }, { "tag", 130 } },
+    L["No loot is waiting to be rolled."])
+local raidList = addList("raid", "RaidWishlistRaid", counted(L["THIS RAID"]),
+    { { "recipient", 100, "text", "LEFT" }, { "tag", 70 } },
+    L["Nothing handed out yet.\nAwards appear here when the raid lead uses RaidLedger."])
+local wishRows, openRows, raidRows = wishList.rows, openList.rows, raidList.rows
 
-local raidHeading = label(raidPane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
-raidHeading:SetPoint("TOPLEFT", raidPane, "TOPLEFT", 12, -10)
-raidHeading:SetText(L["THIS RAID"])
-
-local tallyText = label(raidPane, "GameFontNormalSmall", 9, "faint")
-tallyText:SetPoint("TOPRIGHT", raidPane, "TOPRIGHT", -12, -11)
+local tallyText = label(raidList.pane, "GameFontNormalSmall", 9, "faint")
+tallyText:SetPoint("TOPRIGHT", raidList.pane, "TOPRIGHT", -12, -11)
 tallyText:SetJustifyH("RIGHT")
-
-local raidEmpty = label(raidPane, "GameFontNormalSmall", 11, "dim")
-raidEmpty:SetPoint("CENTER", raidPane, "CENTER", 0, -8)
-raidEmpty:SetJustifyH("CENTER")
-raidEmpty:SetText(L["Nothing handed out yet.\nAwards appear here when the raid lead uses RaidLedger."])
-
-for i = 1, RAID_ROWS do raidRows[i] = listRow(raidPane, i, 430, -28) end
 
 local status = label(Wishlist, "GameFontNormalSmall", 10, "faint")
 status:SetPoint("BOTTOMLEFT", Wishlist, "BOTTOMLEFT", 16, 12)
@@ -516,11 +577,11 @@ status:SetJustifyH("LEFT")
 status:SetWordWrap(false)
 status:SetText(L["Rolls start from the raid lead's RaidLedger  |  /wish help"])
 
--- Import overlay: covers the two lists while shown.
+-- Import overlay: takes the place of the tabs and lists while shown.
 local importPanel = CreateFrame("Frame", "RaidWishlistImportPanel", Wishlist)
-importPanel:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -48)
-importPanel:SetWidth(446)
-importPanel:SetHeight(351)
+importPanel:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -44)
+importPanel:SetWidth(476)
+importPanel:SetHeight(366)
 makeBackdrop(importPanel, "pane", 0.99)
 importPanel:SetFrameLevel(Wishlist:GetFrameLevel() + 5)
 importPanel:Hide()
@@ -542,8 +603,8 @@ local importText = CreateFrame("EditBox", "RaidWishlistImportText", importScroll
 importText:SetMultiLine(true)
 importText:SetAutoFocus(false)
 importText:SetFontObject(ChatFontNormal)
-importText:SetWidth(410)
-importText:SetHeight(220)
+importText:SetWidth(440)
+importText:SetHeight(240)
 importScroll:SetScrollChild(importText)
 importText:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 -- A multi-line edit box is only as tall as its text, so a click below the
@@ -559,7 +620,7 @@ importScroll:SetScript("OnMouseDown", focusImport)
 
 local importButton = flatButton(importPanel, "RaidWishlistImportButton", L["IMPORT WISHLIST"], 130, 24)
 importButton:SetPoint("BOTTOMRIGHT", importPanel, "BOTTOMRIGHT", -10, 10)
-local importCancel = flatButton(importPanel, nil, "CANCEL", 70, 24)
+local importCancel = flatButton(importPanel, nil, L["CANCEL"], 80, 24)
 importCancel:SetPoint("RIGHT", importButton, "LEFT", -6, 0)
 
 -- Roll prompt: one click rolls the wishlisted spec and points.
@@ -611,20 +672,22 @@ end
 
 local function updateWishlist()
     local _, char = ensureDatabase()
+    local list = wishList
     local count = table.getn(char.items)
-    wishHeading:SetText(count > 0 and string.format(L["MY WISHLIST (%d)"], count) or L["MY WISHLIST"])
-    if count > 0 then wishEmpty:Hide() else wishEmpty:Show() end
-    for i = 1, WISH_ROWS do
-        local row, entry = wishRows[i], char.items[i]
+    list.heading:SetText(count > 0 and string.format(L["MY WISHLIST (%d)"], count) or L["MY WISHLIST"])
+    place(list, count)
+    for i = 1, LIST_ROWS do
+        local row, entry = wishRows[i], char.items[i + list.offset]
         row.entry = entry
         if entry then
             row:SetText(string.format("%d. %s", entry.priority, itemLink(entry.itemID)))
+            row.columns.note:SetText(entry.note or "")
             if entry.received then
-                row.right:SetText(L["RECEIVED"])
-                row.right:SetTextColor(0.45, 0.85, 0.55)
+                row.columns.range:SetText(L["RECEIVED"])
+                row.columns.range:SetTextColor(0.45, 0.85, 0.55)
             else
-                row.right:SetText(rangeLabel(entry))
-                row.right:SetTextColor(1.00, 0.82, 0.30)
+                row.columns.range:SetText(rangeLabel(entry))
+                row.columns.range:SetTextColor(1.00, 0.82, 0.30)
             end
             row:Show()
         else
@@ -636,27 +699,27 @@ end
 local function updateRaid()
     local awards = {}
     for _, award in ipairs(sortedAwards()) do
-        if not isOpenAward(award) then table.insert(awards, award) end   -- open ones are listed above
+        if not isOpenAward(award) then table.insert(awards, award) end   -- open ones are in their own tab
     end
+    local list = raidList
     local count = table.getn(awards)
-    raidOffset = math.max(0, math.min(raidOffset, count - RAID_ROWS))
-    raidHeading:SetText(count > 0 and string.format(L["THIS RAID (%d)"], count) or L["THIS RAID"])
+    list.heading:SetText(count > 0 and string.format(L["THIS RAID (%d)"], count) or L["THIS RAID"])
+    place(list, count)
     local items, tokens = myTally()
     tallyText:SetText(string.format(L["YOU: ITEMS %d MS / %d OS  |  TOKENS %d MS / %d OS"],
         items.ms, items.os, tokens.ms, tokens.os))
-    if count > 0 then raidEmpty:Hide() else raidEmpty:Show() end
-    for i = 1, RAID_ROWS do
-        local row, award = raidRows[i], awards[i + raidOffset]
+    for i = 1, LIST_ROWS do
+        local row, award = raidRows[i], awards[i + list.offset]
         row.award = award
         if award then
-            local text = string.format("%s  ->  %s", award.item, award.recipient)
-            if award.state == "deleted" then text = "|cff777777" .. string.gsub(text, "|c%x%x%x%x%x%x%x%x", "") .. "|r" end
-            row:SetText(text)
-            local tag = award.state == "deleted" and L["REMOVED"] or (award.state == "disenchanted" and L["DE"])
+            local removed = award.state == "deleted"
+            row:SetText(removed and ("|cff777777" .. string.gsub(award.item, "|c%x%x%x%x%x%x%x%x", "") .. "|r") or award.item)
+            row.columns.recipient:SetText(award.recipient)
+            local tag = removed and L["REMOVED"] or (award.state == "disenchanted" and L["DE"])
                 or (award.state == "bank" and L["BANK"]) or (SPEC_LABELS[award.spec] or "")
-            if award.token and award.state ~= "deleted" then tag = tag .. L[" TOKEN"] end
-            row.right:SetText(tag)
-            local mine = isPlayer(awardOwner(award)) and award.state ~= "deleted"
+            if award.token and not removed then tag = tag .. L[" TOKEN"] end
+            row.columns.tag:SetText(tag)
+            local mine = isPlayer(awardOwner(award)) and not removed
             local wished = findWish(award.itemID) ~= nil
             local fill = mine and palette.rowMine or palette.row
             row:SetBackdropColor(fill[1], fill[2], fill[3], (mine or wished) and 0.9 or 0)
@@ -671,23 +734,25 @@ local OPEN_STATUS = { o = L["OPEN"], r = L["ROLLING NOW"], w = L["WON"] }
 
 local function updateOpen()
     local items = openItems()
+    local list = openList
     local count = table.getn(items)
-    openHeading:SetText(count > 0 and string.format(L["OPEN ITEMS (%d)"], count) or L["OPEN ITEMS"])
-    if count > 0 then openEmpty:Hide() else openEmpty:Show() end
-    for i = 1, OPEN_ROWS do
-        local row, item = openRows[i], items[i]
+    list.heading:SetText(count > 0 and string.format(L["OPEN ITEMS (%d)"], count) or L["OPEN ITEMS"])
+    place(list, count)
+    for i = 1, LIST_ROWS do
+        local row, item = openRows[i], items[i + list.offset]
         row.open = item
         if item then
-            row:SetText(string.format("%s  %s", item.item, item.where))
+            row:SetText(item.item)
+            row.columns.where:SetText(item.where)
             local tag = OPEN_STATUS[item.status] or L["OPEN"]
             if item.status == "w" and item.winner then tag = string.format(L["WON: %s"], string.upper(item.winner)) end
             local wished = findWish(item.itemID)
             if wished and not wished.received and item.status ~= "w" then tag = L["WISHLIST  "] .. tag end
-            row.right:SetText(tag)
+            row.columns.tag:SetText(tag)
             if item.status == "r" then
-                row.right:SetTextColor(0.45, 0.85, 0.55)
+                row.columns.tag:SetTextColor(0.45, 0.85, 0.55)
             else
-                row.right:SetTextColor(1.00, 0.82, 0.30)
+                row.columns.tag:SetTextColor(1.00, 0.82, 0.30)
             end
             row:SetBackdropColor(palette.row[1], palette.row[2], palette.row[3], wished and 0.9 or 0)
             row:Show()
@@ -697,12 +762,15 @@ local function updateOpen()
     end
 end
 
+wishList.draw, openList.draw, raidList.draw = updateWishlist, updateOpen, updateRaid
+
 local function refresh()
     refreshReceived()
     updateAutoButton()
     updateWishlist()
     updateOpen()
     updateRaid()
+    if currentList then drawTabs() else lists.show(select(2, ensureDatabase()).tab) end
 end
 
 ---------------------------------------------------------------------------
@@ -761,6 +829,7 @@ local function onRollStart(f)
     if rolled[key] then return end
     if not Wishlist:IsShown() then
         refresh()
+        lists.show("open")
         Wishlist:Show()
     end
     local _, char = ensureDatabase()
@@ -848,6 +917,9 @@ local function onAddonMessage(prefix, message, channel, sender)
         if applyOpenItems(f) then refresh() end
     elseif f[1] == "WQ" then
         shareAt = shareAt or (GetTime() + answerDelay())
+    elseif f[1] == "HQ" then
+        -- A ledger asks who runs which addon (its SETTINGS panel lists them).
+        helloAt = helloAt or (GetTime() + answerDelay())
     end
 end
 
@@ -858,15 +930,13 @@ local function showImport(show)
     if show then
         Wishlist:Show()
         importPanel:Show()
-        wishPane:Hide()
-        openPane:Hide()
-        raidPane:Hide()
+        tabBar:Hide()
+        content:Hide()
     else
         importText:ClearFocus()
         importPanel:Hide()
-        wishPane:Show()
-        openPane:Show()
-        raidPane:Show()
+        tabBar:Show()
+        content:Show()
     end
 end
 
@@ -885,7 +955,9 @@ local function importWishlist()
     shareAt = GetTime() + 1     -- the raid lead's ledger learns the new list
     importText:SetText("")
     showImport(false)
+    wishList.offset = 0
     refresh()
+    lists.show("wish")
     local skipped = table.getn(bad) > 0 and string.format(L[" (%d invalid lines skipped)"], table.getn(bad)) or ""
     status:SetText(string.format(L["Imported %d wishlist items%s."], table.getn(list.items), skipped))
     say(string.format(L["imported %d wishlist items%s."], table.getn(list.items), skipped))
@@ -951,10 +1023,19 @@ autoButton:SetScript("OnClick", function()
     local _, char = ensureDatabase()
     setAuto(not char.auto)
 end)
-raidPane:SetScript("OnMouseWheel", function(_, delta)
-    raidOffset = raidOffset - delta
-    updateRaid()
-end)
+local function buttonTip(button, text)
+    button:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:SetText(text, 1, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+buttonTip(autoButton, L["Auto-roll: roll on wishlisted items by yourself, without the prompt (e.g. while away)."])
+buttonTip(importOpen, L["Import: paste your wishlist export from the guild website."])
+buttonTip(wishList.tab, L["Your wishlist in rank order, with the roll range you would use."])
+buttonTip(openList.tab, L["Loot still waiting to be rolled: on the corpse, or parked with a raider."])
+buttonTip(raidList.tab, L["Who got what this raid, and your items so far."])
 
 local function showTooltip(owner, link, extra)
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
@@ -1080,6 +1161,10 @@ Wishlist:SetScript("OnEvent", function(self, event, ...)
             ForgeTestBridge:RegisterFrame("RaidWishlistMinimap", MinimapButton)
             ForgeTestBridge:RegisterFrame("RaidWishlistColor", colorButton)
             ForgeTestBridge:RegisterFrame("RaidWishlistImportField", importBack)
+            ForgeTestBridge:RegisterFrame("RaidWishlistRaid1Recipient", raidRows[1].columns.recipient)
+            for _, list in ipairs(listOrder) do
+                ForgeTestBridge:RegisterFrame("RaidWishlistTab" .. list.id, list.tab)
+            end
         end
     elseif event == "CHAT_MSG_ADDON" then
         onAddonMessage(...)
@@ -1111,6 +1196,11 @@ ticker:SetScript("OnUpdate", function(_, elapsed)
     if shareAt and now >= shareAt then
         shareAt = nil
         shareWishlist()
+    end
+    if helloAt and now >= helloAt then
+        helloAt = nil
+        local channel = groupChannel()
+        if channel then SendAddonMessage(PREFIX, "HW;" .. (GetAddOnMetadata(addonName, "Version") or "?"), channel) end
     end
 end)
 
