@@ -167,7 +167,9 @@ takes passes, but no spec changes.
 
 Every award is announced too: "[item] goes to Bob - main spec." when the
 handout is confirmed or recorded by hand, with "(traded)" or "(corrected)"
-when a trade or a correction changes the recipient.
+when a trade or a correction changes the recipient. An item you keep for
+another player's roll names the winner: "[item] goes to Bob - main spec
+(with Tester until traded)." (2.5.1; it counts in Bob's tally right away).
 
 ## Item and token tally
 

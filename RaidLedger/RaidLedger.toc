@@ -2,7 +2,7 @@
 ## Title: RaidLedger
 ## Notes: Raid setup (invites, groups, attendance), loot rolls, awards and website exports for WoW 3.3.5a
 ## Author: Addon Forge
-## Version: 2.5.0
+## Version: 2.5.1
 ## SavedVariables: RaidLedgerDB
 Locales.lua
 RaidLedger.lua
