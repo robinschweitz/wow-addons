@@ -322,8 +322,15 @@ local function announceAward(record, how)
         announce(string.format(L["[Loot] %s goes to the guild bank (%s)."], record.item, record.recipient))
         return
     end
+    -- An item the master looter keeps for its roll winner goes to the winner;
+    -- the raid hears who won it, not who holds it until the trade.
+    local recipient = record.recipient
+    if record.state == "held" and record.winner and lower(record.winner) ~= lower(record.recipient) then
+        recipient = record.winner
+        how = how or string.format(L["with %s until traded"], record.recipient)
+    end
     local spec = record.spec and (" - " .. SPEC_NAMES[record.spec]) or ""
-    announce(string.format(L["[Loot] %s goes to %s%s%s."], record.item, record.recipient, spec,
+    announce(string.format(L["[Loot] %s goes to %s%s%s."], record.item, recipient, spec,
         how and (" (" .. how .. ")") or ""))
 end
 
