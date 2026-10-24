@@ -103,3 +103,15 @@ L["/wish share on|off - show your wishlist to the raid lead's ledger (on by defa
     "/wish share on|off - Wunschliste der Raidleitung zeigen (Standard: an)"
 L["your wishlist is shared with the raid lead's ledger."] = "deine Wunschliste wird mit dem Buch der Raidleitung geteilt."
 L["your wishlist is no longer shared."] = "deine Wunschliste wird nicht mehr geteilt."
+L["window scale: %d%%."] = "Fensterskalierung: %d%%."
+L["usage: /wish scale <%d-%d> (percent)"] = "Aufruf: /wish scale <%d-%d> (Prozent)"
+L["/wish scale <percent> - make the window smaller or larger; drag its lower right corner to resize it"] =
+    "/wish scale <Prozent> - Fenster kleiner oder größer; die rechte untere Ecke ziehen ändert die Größe"
+L["/wish reset - the window back to the middle, normal size and scale"] =
+    "/wish reset - Fenster mittig, in normaler Größe und Skalierung"
+L["Drag to resize the window"] = "Ziehen, um die Fenstergröße zu ändern"
+L["Make the window larger (up to 150%)"] = "Das Fenster größer machen (bis 150%)"
+L["Make the window smaller (down to 60%)"] = "Das Fenster kleiner machen (bis 60%)"
+
+-- Items the client has not seen yet (the name arrives from the server)
+L["[Item %d]"] = "[Gegenstand %d]"
