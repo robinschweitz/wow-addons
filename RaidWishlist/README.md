@@ -36,6 +36,13 @@ entries, and the window remembers the last tab:
 A roll on a wishlisted item opens the window on **OFFEN**. Every header button
 and tab has a tooltip.
 
+**Size and scale** (2.1.0, for high- and low-resolution clients): drag the
+grip in the lower right corner to make the window larger, up to the screen's
+edges (500 x 440 is the smallest); every list then shows more rows. **- / +**
+beside it (or `/wish scale <percent>`) scale the whole window, 60-150%. Both
+are saved for all your characters; `/wish reset` brings back the middle of the
+screen, 500 x 440 and 100%.
+
 ## Importing the wishlist
 
 On the guild website, copy your wishlist export, click **IMPORT** (or
@@ -122,3 +129,5 @@ private. `/wish share off` stops sharing; `/wish share on` starts it again.
 | `/wish share on` / `off` | Share your wishlist with the raid lead's ledger (on by default) |
 | `/wish minimap on` / `off` | Show / hide the minimap button |
 | `/wish color` / `color reset` | Pick the window color / back to the default |
+| `/wish scale <percent>` | Window scale, 60-150% |
+| `/wish reset` | Window back to the middle, default size and scale |

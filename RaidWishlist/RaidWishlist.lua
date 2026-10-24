@@ -47,8 +47,20 @@ local function split(text)
     return fields
 end
 
+-- An item the client has never seen has no name yet: GetItemInfo answers only
+-- from the client's cache and 3.3.5a has no event when an item arrives. A
+-- hidden tooltip asks the server; the ticker redraws once the names are there.
+local itemScan = CreateFrame("GameTooltip", "RaidWishlistItemScan", UIParent, "GameTooltipTemplate")
+local askedItems = {}      -- itemID -> GetTime() of the last request, until it arrived
 local function itemLink(itemID)
-    return (itemID and select(2, GetItemInfo(itemID))) or ("item:" .. tostring(itemID or 0))
+    local link = itemID and select(2, GetItemInfo(itemID))
+    if link then return link end
+    if itemID and (not askedItems[itemID] or GetTime() - askedItems[itemID] > 30) then
+        askedItems[itemID] = GetTime()
+        itemScan:SetOwner(UIParent, "ANCHOR_NONE")
+        itemScan:SetHyperlink("item:" .. itemID)
+    end
+    return string.format(L["[Item %d]"], itemID or 0)
 end
 
 local function isToken(link)
@@ -375,11 +387,10 @@ end
 -- listRow is one line of a list: the item on the left, then `columns`
 -- ({ key, width, color, justify }) on the right; row.columns[key] holds their
 -- texts (named <row name><Key>, e.g. RaidWishlistRaid1Recipient).
-local ROW_WIDTH = 460
 local function listRow(parent, index, columns, name)
     local row = CreateFrame("Button", name, parent)
     row:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -28 - (index - 1) * 17)
-    row:SetWidth(ROW_WIDTH)
+    row:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
     row:SetHeight(16)
     row:SetBackdrop({ bgFile = "Interface\\ChatFrame\\ChatFrameBackground" })
     row:SetBackdropColor(0, 0, 0, 0)
@@ -406,9 +417,14 @@ local function listRow(parent, index, columns, name)
     return row
 end
 
-Wishlist:SetWidth(500)
-Wishlist:SetHeight(440)
+-- The default and smallest size; users may make it larger and scale it
+-- (raider feedback 2026-10-24: high- and low-resolution clients).
+local WIDTH, HEIGHT = 500, 440
+Wishlist:SetWidth(WIDTH)
+Wishlist:SetHeight(HEIGHT)
 Wishlist:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+Wishlist:SetResizable(true)
+Wishlist:SetMinResize(WIDTH, HEIGHT)
 Wishlist:SetFrameStrata("DIALOG")
 Wishlist:SetClampedToScreen(true)
 Wishlist:EnableMouse(true)
@@ -471,15 +487,16 @@ themeColor(swatch, "texture", "accent")
 ---------------------------------------------------------------------------
 local tabBar = CreateFrame("Frame", nil, Wishlist)
 tabBar:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -44)
-tabBar:SetWidth(476)
+tabBar:SetPoint("RIGHT", Wishlist, "RIGHT", -12, 0)
 tabBar:SetHeight(22)
 
+local CONTENT_TOP, CONTENT_BOTTOM = -72, 30
 local content = CreateFrame("Frame", nil, Wishlist)
-content:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -72)
-content:SetWidth(476)
-content:SetHeight(338)
+content:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, CONTENT_TOP)
+content:SetPoint("BOTTOMRIGHT", Wishlist, "BOTTOMRIGHT", -12, CONTENT_BOTTOM)
 
-local LIST_ROWS = 17
+-- Each list shows as many rows (17 px) as its pane holds: 17 at the default size.
+local function rowsFit(height) return math.max(1, math.floor((height - 28 - 21) / 17)) end
 local lists = {}            -- id -> { pane, rows, offset, count, position, heading, empty, tab }
 local listOrder = {}
 local currentList
@@ -489,20 +506,32 @@ local function addList(id, name, caption, columns, emptyText)
     pane:SetAllPoints(content)
     makeBackdrop(pane, "pane", 0.97)
     pane:Hide()
-    local list = { id = id, pane = pane, rows = {}, offset = 0, count = 0, caption = caption }
+    local list = { id = id, pane = pane, rows = {}, pool = {}, offset = 0, count = 0, caption = caption }
     list.heading = label(pane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
     list.heading:SetPoint("TOPLEFT", pane, "TOPLEFT", 12, -10)
     list.empty = label(pane, "GameFontNormalSmall", 11, "dim")
     list.empty:SetPoint("CENTER", pane, "CENTER", 0, -8)
     list.empty:SetJustifyH("CENTER")
     list.empty:SetText(emptyText)
-    for i = 1, LIST_ROWS do list.rows[i] = listRow(pane, i, columns, name .. i) end
+    -- list.fit(n) makes the first n rows of the pool the list and hides the rest.
+    function list.fit(count)
+        for i = 1, math.max(count, table.getn(list.pool)) do
+            if i <= count then
+                list.pool[i] = list.pool[i] or listRow(pane, i, columns, name .. i)
+                list.rows[i] = list.pool[i]
+            else
+                list.rows[i] = nil
+                list.pool[i]:Hide()
+            end
+        end
+    end
+    list.fit(rowsFit(HEIGHT + CONTENT_TOP - CONTENT_BOTTOM))
     list.position = label(pane, "GameFontNormalSmall", 9, "faint", name .. "Position")
     list.position:SetPoint("BOTTOMRIGHT", pane, "BOTTOMRIGHT", -12, 7)
     list.position:SetJustifyH("RIGHT")
     pane:EnableMouseWheel(true)
     pane:SetScript("OnMouseWheel", function(_, delta)
-        list.offset = math.max(0, math.min(list.offset - delta * 3, list.count - LIST_ROWS))
+        list.offset = math.max(0, math.min(list.offset - delta * 3, list.count - table.getn(list.rows)))
         if list.draw then list.draw() end
     end)
     local tab = flatButton(tabBar, "RaidWishlistTab" .. id, "", 110, 22)
@@ -514,14 +543,15 @@ local function addList(id, name, caption, columns, emptyText)
 end
 
 -- place sets how many entries a list has, clamps its offset and says which
--- of them are shown; the rows then show entries offset+1 .. offset+LIST_ROWS.
+-- of them are shown; the rows then show entries offset+1 .. offset+(rows).
 local function place(list, count)
+    local rows = table.getn(list.rows)
     list.count = count
-    list.offset = math.max(0, math.min(list.offset, count - LIST_ROWS))
+    list.offset = math.max(0, math.min(list.offset, count - rows))
     if count > 0 then list.empty:Hide() else list.empty:Show() end
-    if count > LIST_ROWS then
+    if count > rows then
         list.position:SetText(string.format(L["%d-%d / %d  (mouse wheel)"], list.offset + 1,
-            math.min(count, list.offset + LIST_ROWS), count))
+            math.min(count, list.offset + rows), count))
     else
         list.position:SetText("")
     end
@@ -572,7 +602,6 @@ tallyText:SetJustifyH("RIGHT")
 
 local status = label(Wishlist, "GameFontNormalSmall", 10, "faint")
 status:SetPoint("BOTTOMLEFT", Wishlist, "BOTTOMLEFT", 16, 12)
-status:SetPoint("BOTTOMRIGHT", Wishlist, "BOTTOMRIGHT", -16, 12)
 status:SetJustifyH("LEFT")
 status:SetWordWrap(false)
 status:SetText(L["Rolls start from the raid lead's RaidLedger  |  /wish help"])
@@ -580,8 +609,7 @@ status:SetText(L["Rolls start from the raid lead's RaidLedger  |  /wish help"])
 -- Import overlay: takes the place of the tabs and lists while shown.
 local importPanel = CreateFrame("Frame", "RaidWishlistImportPanel", Wishlist)
 importPanel:SetPoint("TOPLEFT", Wishlist, "TOPLEFT", 12, -44)
-importPanel:SetWidth(476)
-importPanel:SetHeight(366)
+importPanel:SetPoint("BOTTOMRIGHT", Wishlist, "BOTTOMRIGHT", -12, CONTENT_BOTTOM)
 makeBackdrop(importPanel, "pane", 0.99)
 importPanel:SetFrameLevel(Wishlist:GetFrameLevel() + 5)
 importPanel:Hide()
@@ -603,8 +631,8 @@ local importText = CreateFrame("EditBox", "RaidWishlistImportText", importScroll
 importText:SetMultiLine(true)
 importText:SetAutoFocus(false)
 importText:SetFontObject(ChatFontNormal)
-importText:SetWidth(440)
-importText:SetHeight(240)
+importText:SetWidth(WIDTH - 60)
+importText:SetHeight(HEIGHT - 200)
 importScroll:SetScrollChild(importText)
 importText:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 -- A multi-line edit box is only as tall as its text, so a click below the
@@ -622,6 +650,117 @@ local importButton = flatButton(importPanel, "RaidWishlistImportButton", L["IMPO
 importButton:SetPoint("BOTTOMRIGHT", importPanel, "BOTTOMRIGHT", -10, 10)
 local importCancel = flatButton(importPanel, nil, L["CANCEL"], 80, 24)
 importCancel:SetPoint("RIGHT", importButton, "LEFT", -6, 0)
+
+---------------------------------------------------------------------------
+-- Size and scale: the grip in the lower right corner sizes the window (up to
+-- the screen's edges), - / + beside it scale it (60-150%). Both are saved
+-- account-wide in RaidWishlistDB.window; /wish reset restores the defaults.
+---------------------------------------------------------------------------
+local windowSize = {}
+do
+    local SCALE_MIN, SCALE_MAX = 0.6, 1.5
+    local grip = CreateFrame("Button", "RaidWishlistResize", Wishlist)
+    grip:SetWidth(16)
+    grip:SetHeight(16)
+    grip:SetPoint("BOTTOMRIGHT", Wishlist, "BOTTOMRIGHT", -4, 4)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+
+    local scaleUp = flatButton(Wishlist, "RaidWishlistScaleUp", "+", 20, 18)
+    scaleUp:SetPoint("BOTTOMRIGHT", Wishlist, "BOTTOMRIGHT", -24, 8)
+    local scaleValue = label(Wishlist, "GameFontNormalSmall", 10, "soft", "RaidWishlistScaleValue")
+    scaleValue:SetPoint("RIGHT", scaleUp, "LEFT", -2, 0)
+    scaleValue:SetWidth(32)
+    scaleValue:SetJustifyH("CENTER")
+    local scaleDown = flatButton(Wishlist, "RaidWishlistScaleDown", "-", 20, 18)
+    scaleDown:SetPoint("RIGHT", scaleValue, "LEFT", -2, 0)
+    status:SetPoint("RIGHT", scaleDown, "LEFT", -8, 0)
+
+    local function saved()
+        local db = ensureDatabase()
+        db.window = db.window or {}
+        return db.window
+    end
+    local function showScale() scaleValue:SetText(string.format("%d%%", math.floor(Wishlist:GetScale() * 100 + 0.5))) end
+
+    -- A larger scale may shrink the window to keep it on the screen.
+    local function fitScreen()
+        local scale = Wishlist:GetScale()
+        local maxWidth = math.max(WIDTH, math.floor(UIParent:GetWidth() / scale))
+        local maxHeight = math.max(HEIGHT, math.floor(UIParent:GetHeight() / scale))
+        Wishlist:SetWidth(math.max(WIDTH, math.min(Wishlist:GetWidth(), maxWidth)))
+        Wishlist:SetHeight(math.max(HEIGHT, math.min(Wishlist:GetHeight(), maxHeight)))
+    end
+    local function relayout()
+        local height = Wishlist:GetHeight() + CONTENT_TOP - CONTENT_BOTTOM
+        for _, list in ipairs(listOrder) do list.fit(rowsFit(height)) end
+        importText:SetWidth(Wishlist:GetWidth() - 60)
+        importText:SetHeight(Wishlist:GetHeight() - 200)
+        showScale()
+        if Wishlist:IsShown() and windowSize.redraw then windowSize.redraw() end
+    end
+    Wishlist:SetScript("OnSizeChanged", relayout)
+    local function saveSize()
+        local window = saved()
+        window.width, window.height = math.floor(Wishlist:GetWidth() + 0.5), math.floor(Wishlist:GetHeight() + 0.5)
+    end
+
+    -- The window grows right and down, up to the screen's edges.
+    grip:SetScript("OnMouseDown", function()
+        local scale = Wishlist:GetScale()
+        local left, top = Wishlist:GetLeft() or 0, Wishlist:GetTop() or HEIGHT
+        Wishlist:SetMaxResize(math.max(WIDTH, math.floor(UIParent:GetWidth() / scale - left)), math.max(HEIGHT, math.floor(top)))
+        Wishlist:StartSizing("BOTTOMRIGHT")
+    end)
+    grip:SetScript("OnMouseUp", function()
+        Wishlist:StopMovingOrSizing()
+        saveSize()
+        relayout()
+    end)
+
+    -- windowSize.setScale: 0.6-1.5, saved; false when out of range.
+    function windowSize.setScale(scale)
+        scale = tonumber(scale)
+        if not scale or scale < SCALE_MIN - 0.001 or scale > SCALE_MAX + 0.001 then return false end
+        -- Saves the rounded value: the client reads its scale back as a 32-bit float.
+        scale = math.floor(scale * 10 + 0.5) / 10
+        Wishlist:SetScale(scale)
+        saved().scale = scale
+        fitScreen()
+        saveSize()
+        relayout()
+        return true
+    end
+    scaleUp:SetScript("OnClick", function() windowSize.setScale(Wishlist:GetScale() + 0.1) end)
+    scaleDown:SetScript("OnClick", function() windowSize.setScale(Wishlist:GetScale() - 0.1) end)
+
+    -- Restores the saved size and scale (at login, after the SavedVariables).
+    function windowSize.restore()
+        local window = saved()
+        Wishlist:SetScale(window.scale or 1)
+        Wishlist:SetWidth(window.width or WIDTH)
+        Wishlist:SetHeight(window.height or HEIGHT)
+        fitScreen()
+        relayout()
+    end
+    function windowSize.reset()
+        ensureDatabase().window = nil
+        Wishlist:ClearAllPoints()
+        Wishlist:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        windowSize.restore()
+    end
+    function windowSize.command(rest)
+        local percent = tonumber(rest)
+        if percent and windowSize.setScale(percent / 100) then
+            say(string.format(L["window scale: %d%%."], math.floor(Wishlist:GetScale() * 100 + 0.5)))
+        else
+            say(string.format(L["usage: /wish scale <%d-%d> (percent)"], SCALE_MIN * 100, SCALE_MAX * 100))
+        end
+    end
+    windowSize.grip, windowSize.up, windowSize.down = grip, scaleUp, scaleDown
+    showScale()
+end
 
 -- Roll prompt: one click rolls the wishlisted spec and points.
 local Prompt = CreateFrame("Frame", "RaidWishlistPrompt", UIParent)
@@ -676,7 +815,7 @@ local function updateWishlist()
     local count = table.getn(char.items)
     list.heading:SetText(count > 0 and string.format(L["MY WISHLIST (%d)"], count) or L["MY WISHLIST"])
     place(list, count)
-    for i = 1, LIST_ROWS do
+    for i = 1, table.getn(wishRows) do
         local row, entry = wishRows[i], char.items[i + list.offset]
         row.entry = entry
         if entry then
@@ -708,7 +847,7 @@ local function updateRaid()
     local items, tokens = myTally()
     tallyText:SetText(string.format(L["YOU: ITEMS %d MS / %d OS  |  TOKENS %d MS / %d OS"],
         items.ms, items.os, tokens.ms, tokens.os))
-    for i = 1, LIST_ROWS do
+    for i = 1, table.getn(raidRows) do
         local row, award = raidRows[i], awards[i + list.offset]
         row.award = award
         if award then
@@ -738,7 +877,7 @@ local function updateOpen()
     local count = table.getn(items)
     list.heading:SetText(count > 0 and string.format(L["OPEN ITEMS (%d)"], count) or L["OPEN ITEMS"])
     place(list, count)
-    for i = 1, LIST_ROWS do
+    for i = 1, table.getn(openRows) do
         local row, item = openRows[i], items[i + list.offset]
         row.open = item
         if item then
@@ -772,6 +911,7 @@ local function refresh()
     updateRaid()
     if currentList then drawTabs() else lists.show(select(2, ensureDatabase()).tab) end
 end
+windowSize.redraw = refresh
 
 ---------------------------------------------------------------------------
 -- Rolling
@@ -816,6 +956,11 @@ end)
 local function onRollStart(f)
     local itemID, seconds, round = tonumber(f[5]), tonumber(f[6]), tonumber(f[7]) or 1
     if not itemID or not seconds or f[4] == "" then return end
+    -- The first roll of a new raid can be its first message: switch to that
+    -- raid before asking what was received (last raid's awards do not count).
+    local before = ensureDatabase().raid.session
+    if not followSession(f[2] or "") then return end
+    if ensureDatabase().raid.session ~= before then refresh() end
     local entry = findWish(itemID)
     if not entry or entry.received then return end
     if round > 1 then
@@ -1036,6 +1181,9 @@ buttonTip(importOpen, L["Import: paste your wishlist export from the guild websi
 buttonTip(wishList.tab, L["Your wishlist in rank order, with the roll range you would use."])
 buttonTip(openList.tab, L["Loot still waiting to be rolled: on the corpse, or parked with a raider."])
 buttonTip(raidList.tab, L["Who got what this raid, and your items so far."])
+buttonTip(windowSize.grip, L["Drag to resize the window"])
+buttonTip(windowSize.up, L["Make the window larger (up to 150%)"])
+buttonTip(windowSize.down, L["Make the window smaller (down to 60%)"])
 
 local function showTooltip(owner, link, extra)
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
@@ -1144,6 +1292,7 @@ Wishlist:RegisterEvent("CHAT_MSG_ADDON")
 Wishlist:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         ensureDatabase()
+        windowSize.restore()
         applyTheme()
         placeMinimapButton()
         syncAt = GetTime() + 10
@@ -1160,6 +1309,7 @@ Wishlist:SetScript("OnEvent", function(self, event, ...)
             ForgeTestBridge:RegisterFrame("RaidWishlistOpen1", openRows[1])
             ForgeTestBridge:RegisterFrame("RaidWishlistMinimap", MinimapButton)
             ForgeTestBridge:RegisterFrame("RaidWishlistColor", colorButton)
+            ForgeTestBridge:RegisterFrame("RaidWishlistResize", windowSize.grip)
             ForgeTestBridge:RegisterFrame("RaidWishlistImportField", importBack)
             ForgeTestBridge:RegisterFrame("RaidWishlistRaid1Recipient", raidRows[1].columns.recipient)
             for _, list in ipairs(listOrder) do
@@ -1193,6 +1343,17 @@ ticker:SetScript("OnUpdate", function(_, elapsed)
         requestSync()
         shareWishlist()
     end
+    -- Items asked from the server: redraw once one arrived (no event tells us).
+    if next(askedItems) then
+        local arrived = false
+        for itemID in pairs(askedItems) do
+            if GetItemInfo(itemID) then askedItems[itemID] = nil; arrived = true end
+        end
+        if arrived then
+            refresh()
+            if prompt then promptItem:SetText(itemLink(prompt.entry.itemID)) end
+        end
+    end
     if shareAt and now >= shareAt then
         shareAt = nil
         shareWishlist()
@@ -1212,6 +1373,8 @@ local HELP = {
     L["/wish minimap on|off - show or hide the minimap button"],
     L["/wish color [reset] - pick the window color, or go back to the default"],
     L["/wish share on|off - show your wishlist to the raid lead's ledger (on by default)"],
+    L["/wish scale <percent> - make the window smaller or larger; drag its lower right corner to resize it"],
+    L["/wish reset - the window back to the middle, normal size and scale"],
 }
 
 SLASH_RAIDWISHLIST1 = "/wish"
@@ -1241,6 +1404,11 @@ SlashCmdList["RAIDWISHLIST"] = function(message)
             Wishlist:Show()
             pickColor()
         end
+    elseif command == "scale" then
+        windowSize.command(rest)
+    elseif command == "reset" then
+        windowSize.reset()
+        Wishlist:Show()
     elseif command == "sync" then
         if requestSync() then say(L["asked the raid lead's ledger for this raid's awards."]) else say(L["not in a group."]) end
     else
