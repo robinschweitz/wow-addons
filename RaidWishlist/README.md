@@ -1,5 +1,7 @@
 # RaidWishlist
 
+RaidWishlist is GPL-2.0-only. See [LICENSE](LICENSE).
+
 The raid member's side of [RaidLedger](../RaidLedger) for WoW 3.3.5a
 (Interface 30300). Members import their wishlist from the guild website, get a
 one-click roll (or an automatic roll) when the raid lead rolls out a wishlisted
@@ -75,6 +77,37 @@ WL2;Thorgar;1792130000;70
 - `rank` orders the list (1 first); the note is shown in the roll prompt.
 - Lines that break these rules are skipped and counted in the import message.
 
+## Editing in the addon
+
+Click **EDIT** (or use `/wish edit`) to add an item without a website export.
+Search the built-in WotLK raid catalogue by an English or German item name.
+Choose a raid and item quality from the drop-down menus beside the search
+field, then click a result to select it. Hover a result to see its normal item
+tooltip.
+Choose **MS** or **OS**, optionally enable Enhanced for MS, add a note, and
+save. Results show the source raid and scroll with the mouse wheel. Manual
+numeric item ID entry remains available as a
+fallback. Click **SETTINGS** to set this character's current **Enhance points**
+balance and chat roll reminders. Setting points replaces the previous balance
+and clears locally tracked Enhanced spending; only Enhanced wins after that
+count against it. **SAVE SETTINGS** saves the whole page, **CANCEL** drops every
+change. Click an existing wishlist row to change or delete it; changing its
+item ID replaces the item, and an item already on the list is refused. Manual and catalogue changes are shared with RaidLedger
+just like an import.
+
+### Raid catalogue data and attribution
+
+The fixed catalogue contains 1,802 distinct epic and legendary item IDs (no
+trash or world drops below epic) from Naxxramas, Obsidian
+Sanctum, Eye of Eternity, Ulduar, Trial of the Crusader, Onyxia's Lair,
+Icecrown Citadel and Ruby Sanctum. It is generated from the GPL-2.0
+[AzerothCore WotLK world database at commit a34acdc9fce76de45986aed09677c79bdef2aa5d](https://github.com/azerothcore/azerothcore-wotlk/tree/a34acdc9fce76de45986aed09677c79bdef2aa5d/data/sql/base/db_world):
+`item_template`, `item_template_locale`, creature and gameobject spawns and
+templates, and their loot/reference templates. `Catalogue.lua` is the shipped
+output; `tools/generate_raidwishlist_catalogue.py` reproduces it from that
+source revision. The catalogue includes scripted encounter entries as well as
+map-spawned creatures and raid chests.
+
 ## Rolling
 
 When the raid lead's RaidLedger starts a roll on an item from your list,
@@ -87,6 +120,17 @@ second after the roll starts, for example while you are away from the keyboard.
 Either way the addon rolls at most once per roll (the ledger only counts your
 first roll), joins a tie-break only if you are one of the tied players, and
 does not roll on items you already received this raid.
+
+### Chat announcements without RaidLedger
+
+Click **SETTINGS** to configure announcements from another loot addon or from
+chat. The reminder is off until you switch it on there (**CHAT REMINDER**) or
+with `/wish remind on`. Once on, RaidWishlist reacts only when the master looter posts both an
+item from your wishlist and one of the keywords `roll` or `würfel` in party or
+raid chat. Both the keyword list and the restriction to the master looter are
+configurable. Keywords count only outside item links, so a message with just an
+item link (even `[Trollbane]`) never creates a roll prompt. RaidLedger's own
+`[Loot]` announcements are ignored: RaidLedger starts its rolls directly.
 
 ## Open items
 
@@ -124,9 +168,12 @@ private. `/wish share off` stops sharing; `/wish share on` starts it again.
 | --- | --- |
 | `/wish` | Show or hide the window |
 | `/wish import` | Paste a wishlist export |
+| `/wish edit` | Add a wishlist item without an export |
 | `/wish auto on` / `off` | Roll automatically / show the roll prompt |
 | `/wish sync` | Ask the raid lead's ledger for this raid's awards |
 | `/wish share on` / `off` | Share your wishlist with the raid lead's ledger (on by default) |
+| `/wish remind on` / `off` | Open the roll prompt for chat announcements (off by default) |
+| `/wish remind all` / `master` | Chat roll reminders from all group members / only the master looter (default) |
 | `/wish minimap on` / `off` | Show / hide the minimap button |
 | `/wish color` / `color reset` | Pick the window color / back to the default |
 | `/wish scale <percent>` | Window scale, 60-150% |

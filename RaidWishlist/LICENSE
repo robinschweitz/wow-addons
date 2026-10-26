@@ -1,0 +1,17 @@
+RaidWishlist
+Copyright (C) 2026 Addon Forge contributors
+
+RaidWishlist is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 2 only.
+
+RaidWishlist is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+The complete GNU GPL version 2 text is available at:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+The generated raid-loot catalogue is derived from the GPL-2.0 AzerothCore
+WotLK world database. Source attribution and the exact source revision are in
+README.md and Catalogue.lua.
