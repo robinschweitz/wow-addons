@@ -1,13 +1,14 @@
 -- RaidLedger: raid roll and master-loot award ledger for WoW 3.3.5a / Lua 5.1.
 -- Records who really received each item (master-loot handouts, confirmed by the
--- loot chat line), follows trades of items the master looter kept, allows manual
--- corrections and exports the ledger for the raid website (RS2;LOOT).
+-- loot chat line), allows manual corrections and exports the ledger for the
+-- raid website (RS2;LOOT).
 local addonName, ns = ...
 local L = ns.L
 local Ledger = CreateFrame("Frame")   -- events and timers; the window is UI.lua's
 -- The window (UI.lua and the tab files) fills these in; the core only calls them.
 local ui = { status = function() end, refresh = function() end, suggest = function() end,
-    show = function() end, shown = function() return false end }
+    show = function() end, shown = function() return false end,
+    showMasterLoot = function() end, hideMasterLoot = function() end, refreshMasterLoot = function() end }
 ns.ui = ui
 local MAX_HISTORY = 250
 local MAX_ACTIVE = 10
@@ -16,7 +17,6 @@ local ROLL_SECONDS = 30
 local TIE_SECONDS = 15
 local ROLL_LIMITS = { 10, 300 }
 local TIE_LIMITS = { 5, 120 }
-local TRADE_GRACE = 5   -- seconds a closed trade window may still report "Trade complete."
 local EXPORT_FORMAT = "RS2"
 -- Tokens are not counted in the item tally (matched in the item link's name).
 local TOKEN_NAMES = { "Weiheabzeichen" }
@@ -31,11 +31,10 @@ local active = {}
 local selected          -- the selected entry table (not an index: inserts shift indices)
 local editing           -- the history record whose recipient is being corrected
 local lootSlots = {}    -- slot -> { entry = active entry, link = item link } of the open loot window
-local drops = {}        -- source:slot:link -> entry, so reopening a corpse does not duplicate items
+local drops = {}        -- source:link -> entries of the copies still on the source (never listed twice)
 local windowKey, windowNpc
 local windowCount = 0
 local lastKill          -- { guid, npc } of the latest creature death, for chests
-local trade             -- { partner, items, closedAt } of the open or just closed trade
 local patterns = {}
 local syncAt            -- when to ask the group for the shared ledger (after login)
 local wishAskAt         -- when to ask the group's wishlist addons for their lists
@@ -95,9 +94,11 @@ local function say(text)
 end
 
 -- announce goes to raid chat in a raid, party chat in a party, else local chat.
-local function announce(text)
+-- announce sends to raid or party chat; with `warning` (the start of a roll
+-- or tie-break, FR-RL-010) as a raid warning when the player may send one.
+local function announce(text, warning)
     if GetNumRaidMembers() and GetNumRaidMembers() > 0 then
-        SendChatMessage(text, "RAID")
+        SendChatMessage(text, (warning and (IsRaidLeader() or IsRaidOfficer())) and "RAID_WARNING" or "RAID")
     elseif GetNumPartyMembers() and GetNumPartyMembers() > 0 then
         SendChatMessage(text, "PARTY")
     else
@@ -322,12 +323,12 @@ local function announceAward(record, how)
         announce(string.format(L["[Loot] %s goes to the guild bank (%s)."], record.item, record.recipient))
         return
     end
-    -- An item the master looter keeps for its roll winner goes to the winner;
-    -- the raid hears who won it, not who holds it until the trade.
+    -- The winner needs to know which raider currently holds the item.
     local recipient = record.recipient
-    if record.state == "held" and record.winner and lower(record.winner) ~= lower(record.recipient) then
-        recipient = record.winner
-        how = how or string.format(L["with %s until traded"], record.recipient)
+    if record.holder and lower(record.holder) ~= lower(record.recipient) then
+        how = how or string.format(L["pick it up from %s"], record.holder)
+    elseif record.state == "held" and record.winner and lower(record.winner) ~= lower(record.recipient) then
+        recipient = record.winner   -- an award saved before 2026-10-26
     end
     local spec = record.spec and (" - " .. SPEC_NAMES[record.spec]) or ""
     announce(string.format(L["[Loot] %s goes to %s%s%s."], record.item, recipient, spec,
@@ -396,7 +397,7 @@ local rollCount = 0
 -- `tied`) is open for an item: "S;session;origin;rollKey;itemID;seconds;round;
 -- tied,names". It jumps the queue, so award backlogs cannot delay it.
 local function shareRollStart(entry, seconds, tied)
-    if not groupChannel() then return end
+    if entry.disenchanter or not groupChannel() then return end
     if not entry.rollKey then
         rollCount = rollCount + 1
         entry.rollKey = field(playerName()) .. "-" .. time() .. "-" .. rollCount
@@ -462,7 +463,7 @@ local function findRoll(entry, name)
 end
 
 -- recordAward stores an award and removes the item from the active list.
--- Items the recorder gives to himself are "held" until a trade or a correction.
+-- Items the recorder keeps without a roll are "held" (open) until rolled.
 -- The award's spec comes from the recipient's roll, or for a held item from
 -- the roll winner's (the master looter passes it on later).
 local function recordAward(entry, recipient, state, confirmed)
@@ -477,6 +478,17 @@ local function recordAward(entry, recipient, state, confirmed)
     if bundled then entry.bundleLog = log end
     -- A bundle copy belongs to the roller it was won by.
     if bundled and roll then winner = roll.name end
+    -- Kept by the recorder for its roll winner, the item is the winner's award
+    -- at once; chat says where to pick it up (trades are not tracked).
+    -- Kept without a roll, it is an open item until it is rolled.
+    local holder
+    if state ~= "parked" and not NO_TALLY[state] and isPlayer(recipient) then
+        if winner and lower(winner) ~= lower(recipient) then
+            holder, recipient = recipient, winner
+        elseif not winner then
+            state = "held"
+        end
+    end
     db.nextID = db.nextID + 1
     local record = {
         id = db.nextID,
@@ -484,7 +496,8 @@ local function recordAward(entry, recipient, state, confirmed)
         itemID = itemIDFromLink(entry.item),
         npc = entry.npc,
         recipient = field(recipient),
-        state = ((state == "parked" or NO_TALLY[state]) and state) or (isPlayer(recipient) and "held") or state,
+        state = state,
+        holder = holder and field(holder),
         confirmed = confirmed and true or false,
         rolls = table.getn(entry.rolls or {}),
         roll = roll and roll.value,
@@ -637,7 +650,11 @@ end
 local function openRecords()
     local rolling, list = {}, {}
     for _, entry in ipairs(active) do
-        if entry.later and entry.record then rolling[entry.record] = true end
+        if entry.later and entry.records then
+            for _, record in ipairs(entry.records) do rolling[record] = true end
+        elseif entry.later and entry.record then
+            rolling[entry.record] = true
+        end
     end
     local history = ensureDatabase().history
     for i = table.getn(history), 1, -1 do
@@ -648,12 +665,15 @@ local function openRecords()
 end
 
 -- The loot source identifies a corpse or chest across reopened loot windows:
--- the dead target's GUID, else the latest creature death (chests have no unit).
+-- the dead target's GUID, else the dead corpse under the mouse (a right-click
+-- loots without targeting), else the latest creature death (chests).
 local function ensureWindowSource()
     if windowKey then return end
     windowCount = windowCount + 1
     local guid
-    if UnitExists("target") and UnitIsDead("target") and not UnitIsPlayer("target") then guid = UnitGUID("target") end
+    for _, unit in ipairs({ "target", "mouseover" }) do
+        if not guid and UnitExists(unit) and UnitIsDead(unit) and not UnitIsPlayer(unit) then guid = UnitGUID(unit) end
+    end
     if guid then
         windowKey, windowNpc = guid, npcFromGUID(guid)
     elseif lastKill then
@@ -663,7 +683,12 @@ local function ensureWindowSource()
     end
 end
 
-local function addMasterLootItem(slot)
+-- Each copy of an item on a source is listed once, however often the corpse
+-- is opened: the n-th copy of a link in the window is the n-th copy listed
+-- from that source and not handed out yet. Slots are no key, since the client
+-- lists the remaining items from slot 1 on when a corpse is opened again
+-- (raid of 2026-10-26: reopening the boss listed its loot again).
+local function addMasterLootItem(slot, seen)
     local item = GetLootSlotLink(slot)
     if not item or item == "" then return end
     -- Only items at or above the group's loot threshold are worth a roll.
@@ -671,12 +696,13 @@ local function addMasterLootItem(slot)
     local threshold = GetLootThreshold()
     if quality and threshold and quality < threshold then return end
     ensureWindowSource()
-    -- Capture each source slot once, so an awarded item is not re-added by the
-    -- periodic re-scan or by reopening the same corpse.
-    local key = windowKey .. ":" .. slot .. ":" .. item
-    local entry = drops[key]
+    local key = windowKey .. ":" .. item
+    seen[key] = (seen[key] or 0) + 1
+    local copies = drops[key] or {}
+    drops[key] = copies
+    local entry = copies[seen[key]]
     if entry then
-        if not lootSlots[slot] then lootSlots[slot] = { entry = entry, link = item } end
+        lootSlots[slot] = { entry = entry, link = item, key = key }
         return
     end
     -- Identical tokens from one corpse are one bundle, rolled once (raid
@@ -685,16 +711,16 @@ local function addMasterLootItem(slot)
         for _, other in ipairs(active) do
             if other.window == windowKey and other.item == item and not other.later and not other.rollLog then
                 other.count = (other.count or 1) + 1
-                drops[key] = other
-                lootSlots[slot] = { entry = other, link = item }
+                table.insert(copies, other)
+                lootSlots[slot] = { entry = other, link = item, key = key }
                 ui.refresh()
                 return
             end
         end
     end
     entry = { slot = slot, item = item, npc = windowNpc, rolls = {}, window = windowKey }
-    drops[key] = entry
-    lootSlots[slot] = { entry = entry, link = item }
+    table.insert(copies, entry)
+    lootSlots[slot] = { entry = entry, link = item, key = key }
     table.insert(active, 1, entry)
     while table.getn(active) > MAX_ACTIVE do table.remove(active) end
     -- New loot needs attention: leave the roll log of an old award.
@@ -702,15 +728,80 @@ local function addMasterLootItem(slot)
     ui.refresh()
 end
 
+local handedSlots = {}   -- slot -> link handed out in this window, until the server empties it
+
 local function captureMasterLoot()
     local count = GetNumLootItems() or 0
-    for slot = 1, count do addMasterLootItem(slot) end
+    local oldSlots, changed = lootSlots, false
+    lootSlots = {}
+    local seen = {}
+    for slot = 1, count do
+        if handedSlots[slot] and handedSlots[slot] == GetLootSlotLink(slot) then
+            -- Handed out, not emptied yet: it is no copy left on the source.
+            changed = changed or oldSlots[slot] ~= nil
+        else
+            handedSlots[slot] = nil
+            addMasterLootItem(slot, seen)
+        end
+    end
+    for slot, old in pairs(oldSlots) do
+        local current = lootSlots[slot]
+        if not current or current.entry ~= old.entry or current.link ~= old.link then changed = true end
+    end
+    for slot in pairs(lootSlots) do
+        if not oldSlots[slot] then changed = true end
+    end
+    return changed
+end
+
+-- forgetCopy: a handed-out copy has left its source.
+local function forgetCopy(info)
+    local copies = info and info.key and drops[info.key]
+    if not copies then return end
+    for i, entry in ipairs(copies) do
+        if entry == info.entry then
+            table.remove(copies, i)
+            return
+        end
+    end
 end
 
 -- onGiveMasterLoot runs after every master-loot handout, from this ledger or
 -- from the default master-loot menu, and records the real recipient.
 local parkSlots = {}     -- loot slot -> state ("parked", "disenchanted", "bank") of a special handout
+local pendingHandouts = {} -- loot slot -> request, until the server's loot line confirms it
 local finishLaterRoll   -- defined with the award button
+
+-- completeMasterHandout changes the ledger only after the client confirms the
+-- recipient received the item. GiveMasterLoot itself can be rejected silently.
+local function completeMasterHandout(pending)
+    local slot, info, entry = pending.slot, pending.info, pending.entry
+    forgetCopy(info)
+    handedSlots[slot] = pending.link
+    local record = entry.record
+    if record then
+        -- Recorded by hand before the handout: the handout is the truth.
+        record.recipient, record.holder = field(pending.name), nil
+        record.state = pending.mode or "given"
+        if not pending.mode and isPlayer(pending.name) then
+            if record.winner and lower(record.winner) ~= lower(pending.name) then
+                record.recipient, record.holder = field(record.winner), field(pending.name)
+            elseif not record.winner then
+                record.state = "held"
+            end
+        end
+        if NO_TALLY[pending.mode] then record.roll, record.spec, record.low, record.high, record.winner = nil, nil, nil, nil, nil end
+        record.confirmed = true
+        publish(record)
+    else
+        record = recordAward(entry, pending.name, pending.mode or "given", true)
+        ui.suggest(entry)   -- a bundle's next winner
+    end
+    ui.status(string.format(L["Award #%d confirmed: %s received the item."], record.id, record.recipient))
+    announceAward(record)
+    ui.refresh()
+    ui.refreshMasterLoot()
+end
 
 local function onGiveMasterLoot(slot, candidate)
     local name = GetMasterLootCandidate(candidate)
@@ -720,20 +811,8 @@ local function onGiveMasterLoot(slot, candidate)
     local mode = parkSlots[slot]
     parkSlots[slot] = nil
     local entry = info and info.entry or { item = link, npc = windowNpc, rolls = {} }
-    local record = entry.record
-    if record then
-        -- Recorded by hand before the handout: the handout is the truth.
-        record.recipient = field(name)
-        record.state = mode or (isPlayer(name) and "held") or "given"
-        if NO_TALLY[mode] then record.roll, record.spec, record.low, record.high, record.winner = nil, nil, nil, nil, nil end
-        record.confirmed = false
-        publish(record)
-    else
-        record = recordAward(entry, name, mode or "given", false)
-        ui.suggest(entry)   -- a bundle's next winner
-    end
-    ui.status(string.format(L["Gave #%d to %s; waiting for the loot message."], record.id, name))
-    ui.refresh()
+    pendingHandouts[slot] = { slot = slot, info = info, entry = entry, link = link, name = name, mode = mode }
+    ui.status(string.format(L["Giving %s to %s; waiting for loot confirmation."], link, name))
 end
 hooksecurefunc("GiveMasterLoot", onGiveMasterLoot)
 
@@ -749,131 +828,27 @@ local function onLootMessage(message)
     end
     local itemID = itemIDFromLink(link)
     if not itemID then return end
+    for slot, pending in pairs(pendingHandouts) do
+        if itemIDFromLink(pending.link) == itemID and lower(pending.name) == lower(name) then
+            pendingHandouts[slot] = nil
+            completeMasterHandout(pending)
+            return
+        end
+    end
     for _, record in ipairs(ensureDatabase().history) do
         -- Only the recorder confirms and announces an award: another ledger in
         -- the group gets the confirmation with the shared record (two ledgers
         -- announced every item twice in the raid of 2026-10-19).
         if not record.confirmed and record.state ~= "deleted" and record.itemID == itemID
-            and lower(record.recipient) == lower(name) and lower(record.origin or playerName()) == lower(playerName()) then
+            and lower(record.holder or record.recipient) == lower(name) and lower(record.origin or playerName()) == lower(playerName()) then
             record.confirmed = true
             publish(record)
             ui.status(string.format(L["Award #%d confirmed: %s received the item."], record.id, record.recipient))
             announceAward(record)
             ui.refresh()
+            ui.refreshMasterLoot()
             return
         end
-    end
-end
-
--- roster.groupLoot records an item won with group loot (need/greed), which
--- happened by accident in the raid of 2026-10-19 and left the ledger without
--- those items. It counts for nobody until an editor sets its spec
--- (/ledger spec). One ledger in the group records it (Access.lua).
-function roster.groupLoot(message)
-    patterns.rollWon = patterns.rollWon or patternFromFormat(LOOT_ROLL_WON or "%s won: %s")
-    patterns.rollYouWon = patterns.rollYouWon or patternFromFormat(LOOT_ROLL_YOU_WON or "You won: %s")
-    local name, link
-    link = string.match(message or "", patterns.rollYouWon)   -- first: "You won" also fits "%s won"
-    if link then name = playerName() else name, link = string.match(message or "", patterns.rollWon) end
-    if not name or not itemIDFromLink(link) then return false end
-    if ns.isLootRecorder and not ns.isLootRecorder() then return true end
-    local record = recordAward({ item = link, npc = lastKill and lastKill.npc, rolls = {} }, name, "given", true)
-    record.state = "given"   -- a group-loot win is the winner's own, never held for a trade
-    ui.status(string.format(L["Group loot: #%d %s won by %s (no spec; /ledger spec %d ms|os)."],
-        record.id, record.item, record.recipient, record.id))
-    ui.refresh()
-    return true
-end
-
--- Trades: items the master looter kept ("held") move to the trade partner once
--- the trade completes. Trades between other players are not visible here.
-local function tradeItems()
-    local items = {}
-    for slot = 1, 6 do
-        local itemID = itemIDFromLink(GetTradePlayerItemLink(slot))
-        if itemID then table.insert(items, itemID) end
-    end
-    return items
-end
-
-local function snapshotTrade()
-    if not trade or trade.closedAt then return end
-    trade.partner = trade.partner or UnitName("NPC")
-    trade.items = tradeItems()
-end
-
--- The items offered when the player accepts are what the trade hands over: any
--- later change unaccepts the trade. On completion the slots empty (live run
--- 1445c70cd623), so the last slot snapshot alone can miss the traded item.
-hooksecurefunc("AcceptTrade", function()
-    if not trade or trade.closedAt then return end
-    trade.partner = trade.partner or UnitName("NPC")
-    trade.accepted = tradeItems()
-end)
-
-local function rememberTrade(partner, offered, result)
-    ensureDatabase().lastTrade = { partner = partner or "-", offered = offered, result = result, at = time() }
-end
-
--- applyTrade: a held item traded away goes to its roll winner ("given"); an
--- item still waiting for its roll is parked with the trade partner instead
--- (e.g. a unique item another raider holds until the roll). A copy won by the
--- partner moves first, then the oldest held copy.
-local function applyTrade(partner, itemIDs)
-    local history, moved, used = ensureDatabase().history, {}, {}
-    local function heldCopy(itemID, wonByPartner)
-        for i = table.getn(history), 1, -1 do   -- oldest first
-            local record = history[i]
-            if not used[i] and record.state == "held" and record.itemID == itemID and isPlayer(record.recipient)
-                and (not wonByPartner or lower(record.winner) == lower(partner)) then
-                return i, record
-            end
-        end
-    end
-    for _, itemID in ipairs(itemIDs) do
-        local i, record = heldCopy(itemID, true)
-        if not record then i, record = heldCopy(itemID, false) end
-        if record then
-            used[i] = true
-            local open = isOpenAward(record)
-            record.recipient, record.state, record.confirmed = field(partner), open and "parked" or "given", true
-            publish(record)
-            table.insert(moved, record)
-        end
-    end
-    return moved
-end
-
-local function onTradeComplete()
-    if not trade then
-        rememberTrade(nil, 0, "no trade window seen")
-        return
-    end
-    local items = trade.accepted or trade.items
-    if not trade.partner or (trade.closedAt and GetTime() - trade.closedAt > TRADE_GRACE) then
-        rememberTrade(trade.partner, table.getn(items), trade.partner and "too late" or "no partner")
-        trade = nil
-        return
-    end
-    local moved = applyTrade(trade.partner, items)
-    rememberTrade(trade.partner, table.getn(items), "moved " .. table.getn(moved))
-    trade = nil
-    for _, record in ipairs(moved) do
-        say(string.format(L["trade recorded: #%d %s -> %s"], record.id, record.item, record.recipient))
-        ui.status(string.format(L["Award #%d traded: %s has the item now."], record.id, record.recipient))
-        announceAward(record, L["traded"])
-    end
-    if table.getn(moved) > 0 then ui.refresh() end
-end
-
-local function onInfoMessage(...)
-    -- 3.3.5a passes only the message; later clients pass a message type first.
-    local message = select(select("#", ...), ...)
-    if message == ERR_TRADE_COMPLETE then
-        onTradeComplete()
-    elseif message == ERR_TRADE_CANCELLED then
-        if trade then rememberTrade(trade.partner, table.getn(trade.items), "cancelled") end
-        trade = nil
     end
 end
 
@@ -898,10 +873,8 @@ local function setRecipient(id, name, roll)
     end
     record.recipient = field(name)
     if roll then record.winner, record.spec = roll.name, roll.kind end
-    -- Given to the master looter it stays "held" only while it waits for
-    -- another roll winner (the trade); otherwise it is his own award, which
-    -- also closes an open (parked) award he won.
-    record.state = (isPlayer(name) and record.winner and not isPlayer(record.winner)) and "held" or "manual"
+    -- A correction names who has the item; it also closes an open award.
+    record.state, record.holder = "manual", nil
     record.confirmed = true
     record.roll, record.low, record.high = roll and roll.value, roll and roll.low, roll and roll.high
     publish(record)
@@ -1110,6 +1083,8 @@ local function onAddonMessage(prefix, message, channel, sender)
         if applyWishlist(f, sender) then ui.refresh() end
     elseif f[1] == "T" then
         roster.applyAdjust(f, sender)
+    elseif f[1] == "D" then
+        roster.applyDisenchanter(f, sender)
     end
 end
 
@@ -1182,6 +1157,7 @@ local function startNewRaid()
     db.startedAt = nil
     db.raidID = nil
     db.session = nil   -- the next award starts a new shared ledger
+    db.disenchanter = nil
     editing = nil
     ns.resetTallyAdjustments()
     say(L["new raid: the award ledger is empty."])
@@ -1245,7 +1221,7 @@ local function startSelectedRoll(free)
         ui.status(L["Select a master-loot item before starting a roll."])
         return
     end
-    entry.free = free and true or nil
+    entry.free = (free or entry.disenchanter) and true or nil
     entry.nobody = nil
     entry.rolls = {}
     entry.rollLog = {}
@@ -1257,13 +1233,17 @@ local function startSelectedRoll(free)
     entry.startedAt = GetTime()
     entry.reminders = reminders(seconds)
     entry.rollKey = nil
-    if free then
+    if entry.disenchanter then
+        announce(string.format(L["[Loot] Disenchanter roll: /rnd 100 now, %d seconds. The winner disenchants this raid's unwanted items."], seconds), true)
+        ui.status(string.format(L["%d-second disenchanter roll started."], seconds))
+    elseif free then
         -- Not shared: wishlists only prompt for main- and off-spec rolls.
-        announce(string.format(L["[Loot] %s - free BoE roll for any character! /rnd 100, %d seconds."], entry.item, seconds))
+        announce(string.format(L["[Loot] %s - free BoE roll for any character! /rnd 100, %d seconds."], entry.item, seconds), true)
         ui.status(string.format(L["%d-second free BoE roll started."], seconds))
     else
+        local item = (entry.count or 1) > 1 and (entry.count .. "x " .. entry.item) or entry.item
         announce(string.format(L["[Loot] %s - /rnd now! %d seconds. /rnd 100 main spec (enhanced: 1+X to 100+X, X up to 50), /rnd 99 off spec."],
-            entry.item, seconds))
+            item, seconds), true)
         shareRollStart(entry, seconds)
         ui.status(string.format(L["%d-second raid roll started."], seconds))
     end
@@ -1305,9 +1285,22 @@ end
 -- which only the tied players roll again (and which can tie again).
 local function finishRoll(entry)
     entry.endsAt = nil
+    if entry.disenchanter and activeRollCount(entry) == 0 then
+        roster.endDisenchanterRoll(entry, nil)
+        return
+    end
     if activeRollCount(entry) == 0 then
         entry.nobody = true
         announce(string.format(L["[Loot] %s - nobody wanted it."], entry.item))
+        -- Open tokens are still with their holders: back to OPEN ITEMS (FR-RL-016).
+        if entry.records then
+            for index = table.getn(active), 1, -1 do
+                if active[index] == entry then table.remove(active, index) end
+            end
+            if selected == entry then selected = nil end
+            ui.refresh()
+            return
+        end
         -- Nobody needs a BoE item for this character: offer it to everyone.
         if not entry.free and isBindOnEquip(entry.item) then
             local dialog = StaticPopup_Show("RAIDLEDGER_FREE_ROLL", entry.item, nil, entry)
@@ -1336,6 +1329,10 @@ local function finishRoll(entry)
         roster.tieBreak(entry, tied, top)
         return
     end
+    if entry.disenchanter then
+        roster.endDisenchanterRoll(entry, best)
+        return
+    end
     entry.winner = entry.rolls[1]
     entry.tieBreak = nil
     ui.suggest(entry)
@@ -1346,6 +1343,7 @@ local function finishRoll(entry)
     announce(string.format(L["[Loot] %s won by %s (%d) - %s%s, %s so far."], entry.item, best.name, best.value,
         SPEC_NAMES[best.kind], best.low and best.low > 1 and (" " .. best.low .. "-" .. best.high) or "",
         ns.specCounts(counts, best.name, isToken(entry.item))))
+    if entry.later then finishLaterRoll(entry, best.name) end
 end
 
 -- roster.tieBreak starts a tie-break in which only the `tied` players roll.
@@ -1360,7 +1358,7 @@ function roster.tieBreak(entry, tied, value)
     entry.startedAt = GetTime()
     entry.reminders = reminders(seconds)
     announce(string.format(L["[Loot] %s - tie between %s (%d)! %s: /rnd again, %d seconds."],
-        entry.item, joinNames(tied), value, table.concat(tied, ", "), seconds))
+        entry.item, joinNames(tied), value, table.concat(tied, ", "), seconds), true)
     shareRollStart(entry, seconds, tied)
 end
 
@@ -1401,6 +1399,28 @@ function roster.finishBundle(entry)
     announce(string.format(L["[Loot] %dx %s won by %s."], entry.count, entry.item, table.concat(names, ", ")))
     if table.getn(winners) < entry.count then
         announce(string.format(L["[Loot] %s - %d left: nobody wanted it."], entry.item, entry.count - table.getn(winners)))
+    end
+    if entry.records then
+        local log = sortedRollLog(entry)
+        for index, record in ipairs(entry.records) do
+            local roll = winners[index]
+            if roll then
+                local holder = record.recipient
+                record.rollLog, record.rolls = log, table.getn(entry.rolls or {})
+                record.roll, record.spec, record.low, record.high = roll.value, roll.kind, roll.low, roll.high
+                record.winner, record.recipient, record.state = field(roll.name), field(roll.name), "manual"
+                record.holder = lower(holder) ~= lower(roll.name) and field(holder) or nil
+                record.confirmed = true
+                publish(record, true)
+                announceAward({ item = record.item, recipient = record.winner, spec = record.spec },
+                    record.holder and string.format(L["pick it up from %s"], record.holder) or nil)
+            end
+        end
+        for index = table.getn(active), 1, -1 do
+            if active[index] == entry then table.remove(active, index) end
+        end
+        if selected == entry then selected = nil end
+        ui.refresh()
     end
 end
 
@@ -1645,6 +1665,81 @@ local function updateRollTimers()
     if running and ui.shown() then ui.refresh() end
 end
 
+-- The disenchanter roll (raid of 2026-10-26): once per raid everyone may roll
+-- /rnd 100 to become the raid's disenchanter, who then gets every item marked
+-- DE. It runs as a loot-list entry, so it has the usual timer, reminders and
+-- tie-breaks, and counts in no tally. Shared as "D;session;name".
+function roster.startDisenchanterRoll()
+    if roster.denied() then return false end
+    -- /rnd results go to the latest roll: never take them from a running one.
+    local running = rollingEntry()
+    if running and not running.disenchanter then
+        say(L["finish the running roll first."])
+        return false
+    end
+    for _, entry in ipairs(active) do
+        if entry.disenchanter then
+            selected, editing = entry, nil
+            if entry.endsAt then
+                say(L["a disenchanter roll is already running."])
+                ui.refresh()
+                return false
+            end
+            startSelectedRoll()
+            return true
+        end
+    end
+    local entry = { item = L["Disenchanter roll"], disenchanter = true, rolls = {} }
+    table.insert(active, 1, entry)
+    while table.getn(active) > MAX_ACTIVE do table.remove(active) end
+    selected, editing = entry, nil
+    ui.show("loot")
+    startSelectedRoll()
+    return true
+end
+
+function roster.endDisenchanterRoll(entry, best)
+    for index = table.getn(active), 1, -1 do
+        if active[index] == entry then table.remove(active, index) end
+    end
+    if selected == entry then selected = active[1] end   -- back to the loot
+    if not best then
+        announce(L["[Loot] Nobody rolled to disenchant; DE gives items to the name in the box."])
+        ui.refresh()
+        return
+    end
+    ensureDatabase().disenchanter = field(best.name)
+    announce(string.format(L["[Loot] %s is the disenchanter for this raid (%d)."], best.name, best.value))
+    ui.status(string.format(L["%s disenchants this raid: DE gives items to them."], best.name))
+    if groupChannel() then queue(table.concat({ "D", currentSession(), field(best.name) }, ";")) end
+    ui.refresh()
+end
+
+-- roster.setDisenchanter chooses the raid's disenchanter by hand (FR-RL-011).
+function roster.setDisenchanter(name)
+    if roster.denied() then return false end
+    name = trim(name)
+    if name == "" or string.find(name, "[%s;|]") or string.len(name) > 24 then
+        say(L["usage: /ledger de <name>"])
+        return false
+    end
+    ensureDatabase().disenchanter = field(name)
+    announce(string.format(L["[Loot] %s is the disenchanter for this raid."], name))
+    ui.status(string.format(L["%s disenchants this raid: DE gives items to them."], name))
+    if groupChannel() then queue(table.concat({ "D", currentSession(), field(name) }, ";")) end
+    ui.refresh()
+    return true
+end
+
+function roster.applyDisenchanter(f, sender)
+    if ns.trusts and not ns.trusts(sender) then return end
+    if not f[3] or not string.match(f[3], "^[^%s;|]+$") or string.len(f[3]) > 24 or not acceptSession(f[2], sender) then return end
+    ensureDatabase().disenchanter = f[3]
+    ui.refresh()
+end
+
+function roster.disenchanter() return ensureDatabase().disenchanter end
+
 -- startLaterRoll rolls an open award (parked, or held without a roll): the
 -- item joins the roll list, the roll runs as usual, and its result is written
 -- onto the same award.
@@ -1665,11 +1760,24 @@ local function startLaterRoll(record)
     startSelectedRoll()
 end
 
+-- startLaterBundle rolls matching open tokens together. Their physical copies
+-- are already held by raiders, so the winning records change together.
+local function startLaterBundle(records)
+    if table.getn(records) < 2 then return startLaterRoll(records[1]) end
+    local first = records[1]
+    local entry = { item = first.item, npc = first.npc, rolls = {}, records = records, later = true, count = table.getn(records) }
+    table.insert(active, 1, entry)
+    while table.getn(active) > MAX_ACTIVE do table.remove(active) end
+    selected = entry
+    ui.show("loot")
+    startSelectedRoll()
+end
+
 -- Rolls on items in the bags (raider feedback 2026-10-18): Alt+click a bag
 -- item, or /ledger roll <item link>. The item is in the roller's bags, so it
 -- is an award held by them: an open one for that item is rolled, otherwise a
 -- new held award is recorded first. The roll then runs like any later roll,
--- and the winner gets the item by trade.
+-- and the winner is the recipient at once.
 local function mayStartRolls()
     if ns.hasEditors and ns.hasEditors() then return ns.mayEdit() end   -- the editor list decides
     local raid, party = GetNumRaidMembers() or 0, GetNumPartyMembers() or 0
@@ -1740,10 +1848,8 @@ if ContainerFrameItemButton_OnModifiedClick then
     end)
 end
 
--- finishLaterRoll records the winner of a later roll. Held by the master
--- looter, the award stays "held" for the winner until the trade; parked with
--- another raider, the winner becomes the recipient (the hand-over between two
--- other players is not visible to this addon).
+-- finishLaterRoll records the winner of a later roll: the winner becomes the
+-- recipient at once, and chat tells them who currently holds the item.
 finishLaterRoll = function(entry, recipient)
     local record = entry.record
     local holder = record.recipient
@@ -1755,12 +1861,10 @@ finishLaterRoll = function(entry, recipient)
     record.winner = field(recipient)
     record.confirmed = true
     local how
-    if isPlayer(holder) then
-        record.state = "held"
-        how = string.format(L["with %s until traded"], holder)
-    else
-        record.recipient, record.state, record.holder = field(recipient), "manual", holder
-        how = string.format(L["%s hands it over"], holder)
+    record.recipient, record.state = field(recipient), "manual"
+    if lower(holder) ~= lower(recipient) then
+        record.holder = holder
+        how = string.format(L["pick it up from %s"], holder)
     end
     for index = table.getn(active), 1, -1 do
         if active[index] == entry then table.remove(active, index) end
@@ -1768,7 +1872,8 @@ finishLaterRoll = function(entry, recipient)
     if selected == entry then selected = nil end
     publish(record, true)
     announceAward({ item = record.item, recipient = record.winner, spec = record.spec }, how)
-    ui.status(string.format(L["Award #%d goes to %s (%s)."], record.id, record.winner, how))
+    if how then ui.status(string.format(L["Award #%d goes to %s (%s)."], record.id, record.winner, how))
+    else ui.status(string.format(L["Award #%d recorded for %s."], record.id, record.winner)) end
     ui.refresh()
 end
 
@@ -1780,13 +1885,22 @@ end
 -- item is still in it (the GiveMasterLoot hook records it), else recorded by hand.
 local function handOut(holder, state)
     local entry = selectedEntry()
-    if not entry or (entry.later and state ~= "given") then
+    if not entry or entry.disenchanter then
         ui.status(L["Select a loot item first."])
         return false
     end
     if entry.later then
-        finishLaterRoll(entry, holder)
-        return true
+        -- An open item: a won roll goes to its winner; anything else changes
+        -- its award directly (FR-RL-007).
+        if state == "given" and entry.rollLog and entry.rollLog[1] then
+            finishLaterRoll(entry, holder)
+            return true
+        end
+        for index = table.getn(active), 1, -1 do
+            if active[index] == entry then table.remove(active, index) end
+        end
+        if selected == entry then selected = nil end
+        return roster.handOutRecord(entry.record, state, holder)
     end
     local slot = lootSlotOf(entry)
     if slot then
@@ -1809,6 +1923,39 @@ local function handOut(holder, state)
         ui.status(string.format(L["Award #%d recorded for %s."], record.id, holder))
     end
     ui.suggest(entry)   -- a bundle's next winner
+    ui.refresh()
+    return true
+end
+
+-- roster.handOutRecord hands out an open item without a roll (FR-RL-007):
+-- to a player ("given"), for disenchanting or the bank, or parked with
+-- another holder. Chat names the raider from whom to pick it up.
+function roster.handOutRecord(record, state, name)
+    if roster.denied() then return false end
+    name = trim(name)
+    if state == "disenchanted" and ensureDatabase().disenchanter then name = ensureDatabase().disenchanter end
+    if name == "" then
+        if state == "given" then
+            ui.status(L["Choose or enter a recipient name."])
+            return false
+        end
+        name = record.recipient or playerName()   -- it stays with whoever holds it
+    end
+    local holder = record.holder or record.recipient
+    record.recipient = field(name)
+    record.holder = (holder and lower(holder) ~= lower(name)) and field(holder) or nil
+    record.state = (state == "given") and "manual" or state
+    record.winner, record.roll, record.spec, record.low, record.high = nil, nil, nil, nil, nil
+    record.confirmed = true
+    publish(record)
+    announceAward(record)
+    if state == "parked" then
+        ui.status(string.format(L["Award #%d is open, held by %s until it is rolled."], record.id, record.recipient))
+    elseif NO_TALLY[state] then
+        ui.status(string.format(L["Award #%d: %s (%s)."], record.id, stateLabels[state], record.recipient))
+    else
+        ui.status(string.format(L["Award #%d recorded for %s."], record.id, record.recipient))
+    end
     ui.refresh()
     return true
 end
@@ -1839,6 +1986,8 @@ end
 function roster.giveAwaySelected(state, name)
     if roster.denied() then return false end
     name = trim(name)
+    -- The raid's disenchanter gets every DE item, whatever the box holds.
+    if state == "disenchanted" and ensureDatabase().disenchanter then name = ensureDatabase().disenchanter end
     return handOut(name ~= "" and name or playerName(), state)
 end
 
@@ -1855,7 +2004,8 @@ function roster.parkRecord(record, name)
         return false
     end
     name = trim(name)
-    record.recipient = field(name ~= "" and name or record.recipient)
+    record.recipient = field(name ~= "" and name or record.holder or record.recipient)
+    record.holder = nil
     record.state, record.winner, record.spec, record.roll = "parked", nil, nil, nil
     record.low, record.high, record.confirmed = nil, nil, true
     publish(record)
@@ -1901,18 +2051,12 @@ end
 
 Ledger:RegisterEvent("PLAYER_LOGIN")
 Ledger:RegisterEvent("LOOT_OPENED")
-Ledger:RegisterEvent("LOOT_READY")
 Ledger:RegisterEvent("LOOT_CLOSED")
 Ledger:RegisterEvent("CHAT_MSG_SYSTEM")
 Ledger:RegisterEvent("CHAT_MSG_LOOT")
 Ledger:RegisterEvent("RAID_ROSTER_UPDATE")
 Ledger:RegisterEvent("PARTY_MEMBERS_CHANGED")
 Ledger:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-Ledger:RegisterEvent("TRADE_SHOW")
-Ledger:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
-Ledger:RegisterEvent("TRADE_ACCEPT_UPDATE")
-Ledger:RegisterEvent("TRADE_CLOSED")
-Ledger:RegisterEvent("UI_INFO_MESSAGE")
 Ledger:RegisterEvent("CHAT_MSG_ADDON")
 Ledger:SetScript("OnEvent", function(self, event, ...)
     if event == "COMBAT_LOG_EVENT_UNFILTERED" then
@@ -1925,25 +2069,19 @@ Ledger:SetScript("OnEvent", function(self, event, ...)
         ensureDatabase()
         syncAt = GetTime() + 8
         ui.refresh()
-    elseif event == "LOOT_OPENED" or event == "LOOT_READY" then
+    elseif event == "LOOT_OPENED" then
         captureMasterLoot()
         ui.refresh()
+        ui.showMasterLoot()
     elseif event == "LOOT_CLOSED" then
-        lootSlots = {}
+        lootSlots, handedSlots, pendingHandouts = {}, {}, {}
         windowKey, windowNpc = nil, nil
+        ui.hideMasterLoot()
         ui.refresh()
     elseif event == "CHAT_MSG_SYSTEM" then
         recordRoll(...)
     elseif event == "CHAT_MSG_LOOT" then
-        if not roster.groupLoot(...) then onLootMessage(...) end
-    elseif event == "TRADE_SHOW" then
-        trade = { partner = UnitName("NPC"), items = {} }
-    elseif event == "TRADE_PLAYER_ITEM_CHANGED" or event == "TRADE_ACCEPT_UPDATE" then
-        snapshotTrade()
-    elseif event == "TRADE_CLOSED" then
-        if trade and not trade.closedAt then trade.closedAt = GetTime() end
-    elseif event == "UI_INFO_MESSAGE" then
-        onInfoMessage(...)
+        onLootMessage(...)
     elseif event == "CHAT_MSG_ADDON" then
         onAddonMessage(...)
     else
@@ -1962,7 +2100,10 @@ ticker:SetScript("OnUpdate", function(_, elapsed)
     tickElapsed = tickElapsed + elapsed
     if tickElapsed >= 0.25 then
         tickElapsed = 0
-        if LootFrame and LootFrame:IsShown() then captureMasterLoot() end
+        if LootFrame and LootFrame:IsShown() and captureMasterLoot() then
+            ui.refresh()
+            ui.refreshMasterLoot()
+        end
         updateRollTimers()
         shareOpenItems()
         -- Shared ledger: at most four addon messages per second.
@@ -1984,12 +2125,15 @@ ticker:SetScript("OnUpdate", function(_, elapsed)
     end
 end)
 
--- roster.clearActive drops every item from the loot list (not the awards).
+-- roster.clearActive discards unfinished loot work, including open awards.
 function roster.clearActive()
     for i = table.getn(active), 1, -1 do table.remove(active, i) end
+    local history = ensureDatabase().history
+    for i = table.getn(history), 1, -1 do
+        if isOpenAward(history[i]) then table.remove(history, i) end
+    end
     selected = nil
-    drops = {}
-    lootSlots = {}
+    drops, lootSlots, pendingHandouts = {}, {}, {}
     ui.refresh()
 end
 
@@ -2033,6 +2177,10 @@ ns.core = {
     select = function(entry) selected = entry end,
     edit = function(record) editing = record end,
     openRecords = openRecords, lootSlotOf = lootSlotOf, activeRollCount = activeRollCount,
+    isMasterLooter = function()
+        local method, partyLooter = GetLootMethod()
+        return method == "master" and partyLooter == 0
+    end,
     sortedRollLog = sortedRollLog, tallies = tallies, tallyOf = tallyOf, isToken = isToken,
     rollLabel = rollLabel, itemCount = itemCount, ranksAbove = ranksAbove, winningRoll = winningRoll,
     wishersOf = wishersOf, wishOf = wishOf, knowsWishlists = knowsWishlists, summaryLine = summaryLine,
@@ -2040,6 +2188,8 @@ ns.core = {
     rollSeconds = rollSeconds, tieSeconds = tieSeconds,
     startRoll = function(free) if free then startFreeRoll() else startSelectedRoll() end end,
     startLaterRoll = function(record) if not roster.denied() then startLaterRoll(record) end end,
+    startLaterBundle = function(records) if not roster.denied() then startLaterBundle(records) end end,
+    isBindOnEquip = isBindOnEquip,
     deleteRecord = deleteRecord,
     newRaid = startNewRaid,
     -- Shared awards of items this client had not cached yet (item 50667 in the
@@ -2065,6 +2215,7 @@ ns.core = {
         return buildExport(db.raidID, playerName(), db.startedAt, time(), db.history)
     end,
 }
+
 local HELP = {
     L["/ledger - show or hide the ledger"],
     L["/ledger start - start a %d s /rnd roll for the selected item"],
@@ -2077,11 +2228,13 @@ local HELP = {
     L["/ledger pass <name> - the player passes: the next-best roll wins"],
     L["/ledger count <name> ms|os|none|enh <0-50> - change how a roll on the selected item counts"],
     L["/ledger tally - items per player this raid (main spec / off spec)"],
+    L["/ledger deroll - roll the raid's disenchanter (/rnd 100); DE then gives items to them"],
+    L["/ledger de <name> - make <name> the raid's disenchanter without a roll"],
     L["/ledger raid <id> - set the website raid ID"],
     L["/ledger export - show the website export"],
     L["/ledger sync - ask the group's other ledgers for this raid's awards"],
     L["/ledger newraid (or CLEAR) - empty the award ledger for the next raid; add confirm to skip the question"],
-    L["/ledger clear - drop all active rolls;  /ledger reset - recenter the window"],
+    L["/ledger clear - drop all active rolls;  /ledger reset - the window back to the middle, normal size and scale"],
 }
 
 SLASH_RAIDLEDGER1 = "/ledger"
@@ -2099,6 +2252,10 @@ SlashCmdList["RAIDLEDGER"] = function(message)
         rollBagItem(rest)
     elseif command == "free" then
         startFreeRoll()
+    elseif command == "deroll" then
+        roster.startDisenchanterRoll()
+    elseif command == "de" then
+        roster.setDisenchanter(rest)
     elseif command == "pass" then
         local name = rest:match("^(%S+)$")
         if name then roster.apply(name, "pass") else say(L["usage: /ledger pass <name>"]) end

@@ -13,7 +13,7 @@ local L = ns.L
 local FORMAT = "RS2"
 local INVITE_DELAY = 0.3    -- seconds between invites
 local INVITE_EXPIRY = 65    -- an unanswered invite stops reserving a party slot
-local MEMBER_ROWS = 14
+local MEMBER_HEIGHT = 15   -- the member list's row height
 
 local STATUS_LABELS = {
     open = L["open"], invited = L["invited"], joined = L["in raid"], declined = L["declined"],
@@ -190,11 +190,13 @@ hint:SetWidth(300)
 hint:SetJustifyH("LEFT")
 hint:SetText(L["Paste the website's invite list (Raid > Aufstellung > Einladungen für Addon):"])
 
+-- textArea: a framed multi-line edit box; without a height it reaches down to
+-- the panel's bottom (back.fit(height) sizes the edit box then).
 local function textArea(name, top, height)
     local back = CreateFrame("Frame", nil, panel)
     back:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, top)
     back:SetWidth(300)
-    back:SetHeight(height)
+    if height then back:SetHeight(height) else back:SetPoint("BOTTOM", panel, "BOTTOM", 0, 12) end
     ns.makeBackdrop(back, 0.01, 0.02, 0.03, 0.98)
     local scroll = CreateFrame("ScrollFrame", nil, back)
     scroll:SetPoint("TOPLEFT", back, "TOPLEFT", 6, -6)
@@ -205,7 +207,7 @@ local function textArea(name, top, height)
     edit:SetAutoFocus(false)
     edit:SetFontObject(ChatFontNormal)
     edit:SetWidth(286)
-    edit:SetHeight(height - 12)
+    edit:SetHeight((height or 86) - 12)
     scroll:SetScrollChild(edit)
     scroll:SetScript("OnMouseWheel", function(self, delta)
         local range = self:GetVerticalScrollRange() or 0
@@ -222,7 +224,7 @@ local function textArea(name, top, height)
     back:SetScript("OnMouseDown", focus)
     scroll:EnableMouse(true)
     scroll:SetScript("OnMouseDown", focus)
-    return edit
+    return edit, back
 end
 
 local inviteText = textArea("RaidLedgerInviteText", -60, 84)
@@ -249,17 +251,20 @@ local attendanceButton = ns.flatButton(panel, L["EXPORT"], 70)
 _G.RaidLedgerAttendance = attendanceButton
 attendanceButton:SetHeight(20)
 attendanceButton:SetPoint("TOPRIGHT", panel, "TOPLEFT", 312, -206)
-local rosterText = textArea("RaidLedgerRosterText", -234, 86)
+local ROSTER_TOP = -234
+local rosterText = textArea("RaidLedgerRosterText", ROSTER_TOP)
 rosterText:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
 -- Read-only: typing restores the generated text.
 rosterText:SetScript("OnTextChanged", function(self, userInput)
     if userInput and self.generated and self:GetText() ~= self.generated then self:SetText(self.generated) end
 end)
 
+-- The invite list fills the rest of the tab, beside the left column; SORT
+-- GROUPS sits under it, level with the bottom of the attendance field.
+local LIST_TOP, LIST_BOTTOM = -34, 42
 local listBack = CreateFrame("Frame", "RaidLedgerRaidMembers", panel)
-listBack:SetPoint("TOPLEFT", panel, "TOPLEFT", 324, -34)
-listBack:SetWidth(232)
-listBack:SetHeight(MEMBER_ROWS * 15 + 30)
+listBack:SetPoint("TOPLEFT", panel, "TOPLEFT", 324, LIST_TOP)
+listBack:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, LIST_BOTTOM)
 ns.makeBackdrop(listBack, 0.02, 0.045, 0.07, 0.98)
 listBack:EnableMouseWheel(true)
 
@@ -269,25 +274,36 @@ listHeading:SetPoint("TOPRIGHT", listBack, "TOPRIGHT", -8, -8)
 listHeading:SetJustifyH("LEFT")
 listHeading:SetWordWrap(false)
 
-local memberRows = {}
-for i = 1, MEMBER_ROWS do
+local memberRows = ns.rowList(function(i)
     local row = CreateFrame("Frame", "RaidLedgerRaidMember" .. i, listBack)
-    row:SetPoint("TOPLEFT", listBack, "TOPLEFT", 8, -22 - (i - 1) * 15)
-    row:SetPoint("TOPRIGHT", listBack, "TOPRIGHT", -8, -22 - (i - 1) * 15)
+    row:SetPoint("TOPLEFT", listBack, "TOPLEFT", 8, -22 - (i - 1) * MEMBER_HEIGHT)
+    row:SetPoint("TOPRIGHT", listBack, "TOPRIGHT", -8, -22 - (i - 1) * MEMBER_HEIGHT)
     row:SetHeight(14)
     row.text = ns.label(row, "GameFontNormalSmall", 10, {0.82, 0.91, 0.96})
     row.text:SetPoint("LEFT", row, "LEFT", 0, 0)
-    row.text:SetPoint("RIGHT", row, "RIGHT", -96, 0)
+    row.text:SetPoint("RIGHT", row, "RIGHT", -184, 0)
     row.text:SetJustifyH("LEFT")
     row.text:SetWordWrap(false)
     row.state = ns.label(row, "GameFontNormalSmall", 9)
     row.state:SetPoint("RIGHT", row, "RIGHT", 0, 0)
     row.state:SetJustifyH("RIGHT")
-    memberRows[i] = row
-end
+    row.class = ns.label(row, "GameFontNormalSmall", 9, {0.55, 0.72, 0.80})
+    row.class:SetPoint("RIGHT", row, "RIGHT", -96, 0)
+    row.class:SetWidth(84)
+    row.class:SetJustifyH("LEFT")
+    row.class:SetWordWrap(false)
+    return row
+end)
 
 local sortButton = ns.flatButton(panel, L["SORT GROUPS"], 140)
-sortButton:SetPoint("TOPRIGHT", listBack, "BOTTOMRIGHT", 0, -8)
+sortButton:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -12, 12)
+
+-- A larger window: more invite rows and a taller attendance field.
+ns.onResize(function(_, height)
+    local listHeight = height + LIST_TOP - LIST_BOTTOM
+    memberRows.fit(math.max(1, math.floor((listHeight - 30) / MEMBER_HEIGHT)))
+    rosterText:SetHeight(height + ROSTER_TOP - 12 - 12)
+end)
 
 local function updatePanel()
     local data = setup()
@@ -300,11 +316,12 @@ local function updatePanel()
         joined, table.getn(members)) or L["No invite list read yet."]
     if inviting then head = head .. L["  inviting..."] end
     listHeading:SetText(head)
-    memberOffset = math.max(0, math.min(memberOffset, table.getn(members) - MEMBER_ROWS))
-    for i = 1, MEMBER_ROWS do
-        local row, member = memberRows[i], members[i + memberOffset]
+    memberOffset = math.max(0, math.min(memberOffset, table.getn(members) - table.getn(memberRows)))
+    for i, row in ipairs(memberRows) do
+        local member = members[i + memberOffset]
         if member then
             row.text:SetText(string.format("%s  %s", member.name, ROLE_LABELS[member.role] or member.role or ""))
+            row.class:SetText(member.class or "")
             row.state:SetText(STATUS_LABELS[member.status] or member.status)
             local color = STATUS_COLORS[member.status] or STATUS_COLORS.open
             row.state:SetTextColor(color[1], color[2], color[3])

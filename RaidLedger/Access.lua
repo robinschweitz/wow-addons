@@ -156,14 +156,14 @@ legend:SetText(L["Green: RaidLedger (version)  |  blue: RaidWishlist only  |  gr
 
 -- Options (everything that was a chat command only): roll lengths, the
 -- minimap button, the window position, a sync of the awards.
-local OPTIONS_X = 574
+local OPTIONS_X = -154   -- from the right edge, so the column follows a wider window
 local optionsHeading = ns.label(panel, "GameFontNormal", 10, {0.54, 0.88, 1.00})
-optionsHeading:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, -38)
+optionsHeading:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -38)
 optionsHeading:SetText(L["ROLLS"])
 
 local function secondsBox(name, caption, y)
     local text = ns.label(panel, "GameFontNormalSmall", 10, {0.75, 0.85, 0.92})
-    text:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, y - 5)
+    text:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, y - 5)
     text:SetText(caption)
     local box = CreateFrame("EditBox", name, panel, "InputBoxTemplate")
     box:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, y)
@@ -178,25 +178,40 @@ local rollBox = secondsBox("RaidLedgerRollSeconds", L["Roll (s)"], -56)
 local tieBox = secondsBox("RaidLedgerTieSeconds", L["Tie-break (s)"], -82)
 local timerButton = ns.flatButton(panel, L["APPLY"], 136, "RaidLedgerApplyTimers")
 timerButton:SetHeight(20)
-timerButton:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, -108)
+timerButton:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -108)
 
 local miscHeading = ns.label(panel, "GameFontNormal", 10, {0.54, 0.88, 1.00})
-miscHeading:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, -166)
+miscHeading:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -166)
 miscHeading:SetText(L["WINDOW"])
 local minimapButton = ns.flatButton(panel, L["MINIMAP: ON"], 136, "RaidLedgerMinimapToggle")
 minimapButton:SetHeight(20)
-minimapButton:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, -184)
-local centerButton = ns.flatButton(panel, L["CENTER WINDOW"], 136)
+minimapButton:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -184)
+-- Scale: smaller for low resolutions, larger for high ones.
+local scaleText = ns.label(panel, "GameFontNormalSmall", 10, {0.75, 0.85, 0.92})
+scaleText:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -213)
+scaleText:SetText(L["Scale"])
+local scaleUp = ns.flatButton(panel, "+", 20, "RaidLedgerScaleUp")
+scaleUp:SetHeight(20)
+scaleUp:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -208)
+local scaleValue = ns.label(panel, "GameFontNormalSmall", 10, {1.00, 0.86, 0.45}, "RaidLedgerScaleValue")
+scaleValue:SetPoint("RIGHT", scaleUp, "LEFT", -2, 0)
+scaleValue:SetWidth(32)
+scaleValue:SetJustifyH("CENTER")
+local scaleDown = ns.flatButton(panel, "-", 20, "RaidLedgerScaleDown")
+scaleDown:SetHeight(20)
+scaleDown:SetPoint("RIGHT", scaleValue, "LEFT", -2, 0)
+local centerButton = ns.flatButton(panel, L["RESET WINDOW"], 136)
 centerButton:SetHeight(20)
-centerButton:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, -208)
+centerButton:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -232)
 local syncButton = ns.flatButton(panel, L["SYNC AWARDS"], 136, "RaidLedgerSync")
 syncButton:SetHeight(20)
-syncButton:SetPoint("TOPLEFT", panel, "TOPLEFT", OPTIONS_X, -232)
+syncButton:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -256)
 
 function ns.refreshOptions()
     if not rollBox:HasFocus() then rollBox:SetText(tostring(ns.core.rollSeconds())) end
     if not tieBox:HasFocus() then tieBox:SetText(tostring(ns.core.tieSeconds())) end
     minimapButton:SetText(ns.ensureDatabase().minimapHidden and L["MINIMAP: OFF"] or L["MINIMAP: ON"])
+    scaleValue:SetText(string.format("%d%%", math.floor(ns.ui.scale() * 100 + 0.5)))
 end
 
 timerButton:SetScript("OnClick", function()
@@ -216,13 +231,17 @@ minimapButton:SetScript("OnClick", function()
     ns.commands.minimap(ns.ensureDatabase().minimapHidden and "on" or "off")
     ns.refreshOptions()
 end)
-centerButton:SetScript("OnClick", function() ns.ui.resetPosition() end)
+centerButton:SetScript("OnClick", function() ns.ui.resetPosition() ns.refreshOptions() end)
+scaleUp:SetScript("OnClick", function() ns.ui.setScale(ns.ui.scale() + 0.1) ns.refreshOptions() end)
+scaleDown:SetScript("OnClick", function() ns.ui.setScale(ns.ui.scale() - 0.1) ns.refreshOptions() end)
 syncButton:SetScript("OnClick", function() ns.core.sync() end)
 ns.tip(rollBox, L["How long a roll runs; reminders come at half and a quarter of it"])
 ns.tip(tieBox, L["How long a tie-break runs"])
 ns.tip(timerButton, L["Use these lengths for the next rolls (a running roll keeps its time)"])
 ns.tip(minimapButton, L["Show or hide the minimap button"])
-ns.tip(centerButton, L["Move this window back to the middle of the screen"])
+ns.tip(centerButton, L["Move this window back to the middle of the screen, at its normal size and scale"])
+ns.tip(scaleUp, L["Make the window larger (up to 150%)"])
+ns.tip(scaleDown, L["Make the window smaller (down to 60%)"])
 ns.tip(syncButton, L["Ask the group's other ledgers for this raid's awards (e.g. after a crash)"])
 
 local function userOf(name)
@@ -364,34 +383,6 @@ function ns.onMessage(f, sender)
     end
     ns.refreshSettings()
     return true
-end
-
--- lootRecorder: of the ledgers in the group that may edit (with an empty
--- list: the leader and assistants), the first by name records group loot,
--- so two ledgers never record it twice. Without one, the first ledger does.
-function ns.isLootRecorder()
-    local eligible, everyone = {}, {}
-    local rank = {}
-    for i = 1, GetNumRaidMembers() or 0 do
-        local name, memberRank = GetRaidRosterInfo(i)
-        if name then rank[ns.lower(name)] = memberRank or 0 end
-    end
-    local party = (GetNumRaidMembers() or 0) == 0
-    for _, member in ipairs(ns.members()) do
-        local user = userOf(member.name)
-        if user and user.ledger then
-            table.insert(everyone, ns.lower(member.name))
-            local may
-            if ns.hasEditors() then may = listed(member.name)
-            elseif party then may = ns.isPlayer(member.name) and IsPartyLeader() and true or false
-            else may = (rank[ns.lower(member.name)] or 0) > 0 end
-            if may then table.insert(eligible, ns.lower(member.name)) end
-        end
-    end
-    local pool = table.getn(eligible) > 0 and eligible or everyone
-    if table.getn(pool) == 0 then return true end
-    table.sort(pool)
-    return pool[1] == ns.lower(ns.playerName())
 end
 
 nameBox:SetScript("OnEnterPressed", function(self)
