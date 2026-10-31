@@ -8,10 +8,8 @@ local _, ns = ...
 local L = ns.L
 local core, ui = ns.core, ns.ui
 local roster = core.roster
-local PLAYER_ROWS, AWARD_ROWS = 17, 7
 local LEFT_WIDTH = 440
-local RIGHT_X = LEFT_WIDTH + 12
-local RIGHT_WIDTH = ns.CONTENT_WIDTH - RIGHT_X
+local AWARDS_TOP = 234
 local COUNTERS = {
     { key = "ms", tokens = false, spec = "ms", caption = L["Items main spec"] },
     { key = "os", tokens = false, spec = "os", caption = L["Items off spec"] },
@@ -23,7 +21,7 @@ local CORRECTED = { 1.00, 0.86, 0.45 }
 local panel = CreateFrame("Frame", "RaidLedgerTallyTab")
 local playerOffset, selectedName = 0, nil
 
-local list = ns.pane(panel, 0, 0, LEFT_WIDTH, ns.CONTENT_HEIGHT, "RaidLedgerTallyList")
+local list = ns.pane(panel, 0, 0, LEFT_WIDTH, nil, "RaidLedgerTallyList")
 list.heading:SetText(L["TALLY THIS RAID"])
 local columnHeads = {}
 for i, caption in ipairs({ L["TOK. OS"], L["TOK. MS"], L["ITEMS OS"], L["ITEMS MS"] }) do
@@ -38,25 +36,26 @@ local nameHead = ns.label(list, "GameFontNormalSmall", 9, {0.55, 0.72, 0.80})
 nameHead:SetPoint("TOPLEFT", list, "TOPLEFT", 17, -32)
 nameHead:SetText(L["PLAYER"])
 
-local playerRows = {}
-for i = 1, PLAYER_ROWS do
-    local row = ns.listRow(list, LEFT_WIDTH - 20, { 56, 56, 56, 56 }, "RaidLedgerTallyRow" .. i)
+local playerRows = ns.rowList(function(i)
+    local row = ns.listRow(list, 0, { 56, 56, 56, 56 }, "RaidLedgerTallyRow" .. i)
     row:SetPoint("TOPLEFT", list, "TOPLEFT", 10, -46 - (i - 1) * ns.ROW_HEIGHT)
-    playerRows[i] = row
-end
+    row:SetPoint("RIGHT", list, "RIGHT", -10, 0)
+    return row
+end)
 local emptyText = ns.label(list, "GameFontNormalSmall", 11, {0.42, 0.61, 0.70})
 emptyText:SetPoint("CENTER", list, "CENTER", 0, 10)
 emptyText:SetText(L["Nobody in the group and no awards yet."])
 
-local detail = ns.pane(panel, RIGHT_X, 0, RIGHT_WIDTH, ns.CONTENT_HEIGHT, "RaidLedgerTallyDetail")
+local detail = ns.pane(panel, 0, 0, nil, nil, "RaidLedgerTallyDetail")
+ns.sideBySide(list, detail, LEFT_WIDTH)
 detail.heading:SetText(L["SELECTED PLAYER"])
 local playerTitle = ns.label(detail, "GameFontHighlight", 13, {0.94, 0.97, 1.00})
 playerTitle:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -28)
-playerTitle:SetWidth(RIGHT_WIDTH - 24)
+playerTitle:SetPoint("RIGHT", detail, "RIGHT", -12, 0)
 playerTitle:SetJustifyH("LEFT")
 local hint = ns.label(detail, "GameFontNormalSmall", 9, {0.45, 0.60, 0.68})
 hint:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -48)
-hint:SetWidth(RIGHT_WIDTH - 24)
+hint:SetPoint("RIGHT", detail, "RIGHT", -12, 0)
 hint:SetHeight(24)
 hint:SetJustifyH("LEFT")
 hint:SetJustifyV("TOP")
@@ -88,12 +87,18 @@ resetButton:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -186)
 
 local awardsHeading = ns.label(detail, "GameFontNormal", 10, {1.00, 0.80, 0.32})
 awardsHeading:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -218)
-local awardRows = {}
-for i = 1, AWARD_ROWS do
-    local row = ns.listRow(detail, RIGHT_WIDTH - 20, { 34 }, "RaidLedgerTallyAward" .. i)
-    row:SetPoint("TOPLEFT", detail, "TOPLEFT", 10, -234 - (i - 1) * ns.ROW_HEIGHT)
-    awardRows[i] = row
-end
+local awardRows = ns.rowList(function(i)
+    local row = ns.listRow(detail, 0, { 34 }, "RaidLedgerTallyAward" .. i)
+    row:SetPoint("TOPLEFT", detail, "TOPLEFT", 10, -AWARDS_TOP - (i - 1) * ns.ROW_HEIGHT)
+    row:SetPoint("RIGHT", detail, "RIGHT", -10, 0)
+    return row
+end)
+
+-- A larger window: more players and awards.
+ns.onResize(function(_, height)
+    playerRows.fit(ns.rowsFit(height, 46, 24))
+    awardRows.fit(ns.rowsFit(height, AWARDS_TOP, 16))
+end)
 
 ---------------------------------------------------------------------------
 -- Data and drawing
@@ -130,7 +135,7 @@ end
 
 local function drawList()
     local names = players()
-    playerOffset = math.max(0, math.min(playerOffset, table.getn(names) - PLAYER_ROWS))
+    playerOffset = math.max(0, math.min(playerOffset, table.getn(names) - table.getn(playerRows)))
     for i, row in ipairs(playerRows) do
         local name = names[i + playerOffset]
         row.playerName = name

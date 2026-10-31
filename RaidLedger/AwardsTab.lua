@@ -1,15 +1,14 @@
 -- VERGABEN tab: every award of this raid on the left, the selected award on
--- the right - which tally it counts for (MS / OS / none), its recipient, park
--- / DE / BANK / remove, and its roll log (right-click a roll to pass or
--- recount it). EXPORT shows the website export in place of the tab.
+-- the right. It only corrects (FR-RL-009): which tally it counts for (MS / OS
+-- / none), its recipient, back to BEUTE (to roll or hand it out again),
+-- remove, and its roll log (right-click a roll to pass or recount it).
+-- EXPORT shows the website export in place of the tab.
 local _, ns = ...
 local L = ns.L
 local core, ui = ns.core, ns.ui
 local roster = core.roster
-local AWARD_ROWS, LOG_ROWS = 18, 8
 local LEFT_WIDTH = 420
-local RIGHT_X = LEFT_WIDTH + 12
-local RIGHT_WIDTH = ns.CONTENT_WIDTH - RIGHT_X
+local LOG_TOP = 204
 
 local panel = CreateFrame("Frame", "RaidLedgerAwardsTab")
 local awardOffset, logOffset = 0, 0
@@ -22,10 +21,10 @@ local STATE_COLORS = {
 }
 
 local function stateText(record)
-    local text = core.stateLabels[record.state] or string.upper(record.state or "")
+    local text = record.state == "manual" and "" or (core.stateLabels[record.state] or string.upper(record.state or ""))
     if record.state == "held" and not ns.isPlayer(record.recipient) then text = L["HELD"] end
     if core.isOpenAward(record) then text = L["OPEN"] end
-    if not record.confirmed and record.state ~= "deleted" then text = text .. "?" end
+    if text ~= "" and not record.confirmed and record.state ~= "deleted" then text = text .. "?" end
     local color = core.isOpenAward(record) and STATE_COLORS.parked or STATE_COLORS[record.state] or STATE_COLORS.manual
     return text, color
 end
@@ -33,7 +32,7 @@ end
 ---------------------------------------------------------------------------
 -- Award list
 ---------------------------------------------------------------------------
-local list = ns.pane(panel, 0, 0, LEFT_WIDTH, ns.CONTENT_HEIGHT, "RaidLedgerHistoryPane")
+local list = ns.pane(panel, 0, 0, LEFT_WIDTH, nil, "RaidLedgerHistoryPane")
 local exportButton = ns.flatButton(list, L["EXPORT"], 70, "RaidLedgerExport")
 exportButton:SetHeight(18)
 exportButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -8, -6)
@@ -44,21 +43,22 @@ local emptyText = ns.label(list, "GameFontNormalSmall", 11, {0.42, 0.61, 0.70})
 emptyText:SetPoint("CENTER", list, "CENTER", 0, 10)
 emptyText:SetText(L["No awards recorded in this ledger."])
 
-local awardRows = {}
-for i = 1, AWARD_ROWS do
-    local row = ns.listRow(list, LEFT_WIDTH - 20, { 64, 86 }, "RaidLedgerAwardLine" .. i)
+local awardRows = ns.rowList(function(i)
+    local row = ns.listRow(list, 0, { 64, 86 }, "RaidLedgerAwardLine" .. i)
     row:SetPoint("TOPLEFT", list, "TOPLEFT", 10, -28 - (i - 1) * ns.ROW_HEIGHT)
-    awardRows[i] = row
-end
+    row:SetPoint("RIGHT", list, "RIGHT", -10, 0)
+    return row
+end)
 
 ---------------------------------------------------------------------------
 -- The selected award
 ---------------------------------------------------------------------------
-local detail = ns.pane(panel, RIGHT_X, 0, RIGHT_WIDTH, ns.CONTENT_HEIGHT, "RaidLedgerAwardDetail")
+local detail = ns.pane(panel, 0, 0, nil, nil, "RaidLedgerAwardDetail")
+ns.sideBySide(list, detail, LEFT_WIDTH)
 detail.heading:SetText(L["SELECTED AWARD"])
 local titleButton = CreateFrame("Button", nil, detail)
 titleButton:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -28)
-titleButton:SetWidth(RIGHT_WIDTH - 24)
+titleButton:SetPoint("RIGHT", detail, "RIGHT", -12, 0)
 titleButton:SetHeight(18)
 local awardTitle = ns.label(titleButton, "GameFontHighlight", 12, {0.94, 0.97, 1.00})
 awardTitle:SetAllPoints(titleButton)
@@ -66,7 +66,7 @@ awardTitle:SetJustifyH("LEFT")
 awardTitle:SetWordWrap(false)
 local nowLine = ns.label(detail, "GameFontNormalSmall", 10, {0.45, 0.68, 0.80})
 nowLine:SetPoint("TOPLEFT", titleButton, "BOTTOMLEFT", 0, -4)
-nowLine:SetWidth(RIGHT_WIDTH - 24)
+nowLine:SetPoint("RIGHT", titleButton, "RIGHT", 0, 0)
 nowLine:SetHeight(14)
 nowLine:SetJustifyH("LEFT")
 nowLine:SetWordWrap(false)
@@ -88,38 +88,39 @@ recipientHint:SetPoint("TOPLEFT", detail, "TOPLEFT", 14, -112)
 recipientHint:SetText(L["RECIPIENT NAME"])
 local recipientBox = CreateFrame("EditBox", "RaidLedgerAwardRecipient", detail, "InputBoxTemplate")
 recipientBox:SetPoint("TOPLEFT", detail, "TOPLEFT", 18, -124)
-recipientBox:SetWidth(126)
+recipientBox:SetPoint("TOPRIGHT", detail, "TOP", -3, -124)
 recipientBox:SetHeight(22)
 recipientBox:SetAutoFocus(false)
 recipientBox:SetMaxLetters(24)
 local changeButton = ns.flatButton(detail, L["CHANGE"], 124, "RaidLedgerChangeRecipient")
 changeButton:SetHeight(22)
-changeButton:SetPoint("LEFT", recipientBox, "RIGHT", 8, 0)
+changeButton:ClearAllPoints()
+changeButton:SetPoint("TOPLEFT", detail, "TOP", 3, -124)
+changeButton:SetPoint("TOPRIGHT", detail, "TOPRIGHT", -12, -124)
 
-local parkButton = ns.flatButton(detail, L["PARK"], 80, "RaidLedgerAwardPark")
+-- Back to BEUTE: the award becomes an open item with whoever holds it
+-- (the live plans know it as RaidLedgerAwardPark).
+local parkButton = ns.flatButton(detail, L["BACK TO LOOT"], 140, "RaidLedgerAwardPark")
 parkButton:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -152)
+parkButton:SetPoint("TOPRIGHT", detail, "TOP", -3, -152)
 ns.makeBackdrop(parkButton, 0.20, 0.12, 0.30, 0.98)
-local deButton = ns.flatButton(detail, L["DE"], 44, "RaidLedgerAwardDE")
-deButton:SetPoint("LEFT", parkButton, "RIGHT", 6, 0)
-local bankButton = ns.flatButton(detail, L["BANK"], 56, "RaidLedgerAwardBank")
-bankButton:SetPoint("LEFT", deButton, "RIGHT", 6, 0)
-for _, button in ipairs({ deButton, bankButton }) do ns.makeBackdrop(button, 0.16, 0.12, 0.24, 0.98) end
-local removeButton = ns.flatButton(detail, L["REMOVE"], 80, "RaidLedgerRemove")
-removeButton:SetPoint("LEFT", bankButton, "RIGHT", 6, 0)
+local removeButton = ns.flatButton(detail, L["REMOVE"], 90, "RaidLedgerRemove")
+removeButton:SetPoint("TOPLEFT", detail, "TOP", 3, -152)
+removeButton:SetPoint("TOPRIGHT", detail, "TOPRIGHT", -12, -152)
 ns.makeBackdrop(removeButton, 0.28, 0.10, 0.10, 0.98)
 
 local logHeading = ns.label(detail, "GameFontNormal", 10, {1.00, 0.80, 0.32})
 logHeading:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, -188)
-local logRows = {}
-for i = 1, LOG_ROWS do
+local logRows = ns.rowList(function(i)
     -- RaidLedgerRoll1..: the names the live test plans use for the roll log.
-    local row = ns.listRow(detail, RIGHT_WIDTH - 20, { 30 }, "RaidLedgerRoll" .. i)
-    row:SetPoint("TOPLEFT", detail, "TOPLEFT", 10, -204 - (i - 1) * ns.ROW_HEIGHT)
-    logRows[i] = row
-end
+    local row = ns.listRow(detail, 0, { 30 }, "RaidLedgerRoll" .. i)
+    row:SetPoint("TOPLEFT", detail, "TOPLEFT", 10, -LOG_TOP - (i - 1) * ns.ROW_HEIGHT)
+    row:SetPoint("RIGHT", detail, "RIGHT", -10, 0)
+    return row
+end)
 local noLog = ns.label(detail, "GameFontNormalSmall", 10, {0.42, 0.61, 0.70})
-noLog:SetPoint("TOPLEFT", detail, "TOPLEFT", 16, -208)
-noLog:SetWidth(RIGHT_WIDTH - 32)
+noLog:SetPoint("TOPLEFT", detail, "TOPLEFT", 16, -LOG_TOP - 4)
+noLog:SetPoint("RIGHT", detail, "RIGHT", -16, 0)
 noLog:SetJustifyH("LEFT")
 
 ---------------------------------------------------------------------------
@@ -157,9 +158,25 @@ local exportText = CreateFrame("EditBox", "RaidLedgerExportText", exportScroll)
 exportText:SetMultiLine(true)
 exportText:SetAutoFocus(false)
 exportText:SetFontObject(ChatFontNormal)
-exportText:SetWidth(ns.CONTENT_WIDTH - 36)
-exportText:SetHeight(280)
 exportScroll:SetScrollChild(exportText)
+
+-- A wider window keeps all selected-award actions on one shared grid.
+ns.onResize(function(width, height)
+    local listWidth = LEFT_WIDTH + math.floor((width - ns.CONTENT_WIDTH) * 0.4)
+    local inner = width - listWidth - 12 - 24
+    local each = math.floor((inner - 12) / 3)
+    for index, button in ipairs(specButtons) do
+        button:SetWidth(index < 3 and each or inner - each * 2 - 12)
+        if index > 1 then
+            button:ClearAllPoints()
+            button:SetPoint("LEFT", specButtons[index - 1], "RIGHT", 6, 0)
+        end
+    end
+    awardRows.fit(ns.rowsFit(height, 28, 24))
+    logRows.fit(ns.rowsFit(height, LOG_TOP, 28))
+    exportText:SetWidth(width - 36)
+    exportText:SetHeight(height - 96)
+end)
 exportScroll:SetScript("OnMouseWheel", function(self, delta)
     local range = self:GetVerticalScrollRange() or 0
     self:SetVerticalScroll(math.max(0, math.min(range, self:GetVerticalScroll() - delta * 28)))
@@ -188,23 +205,27 @@ end
 ---------------------------------------------------------------------------
 -- Drawing
 ---------------------------------------------------------------------------
+-- awards: the history without its open items, which wait for their roll in
+-- the loot tab (one place for each item, raid of 2026-10-26).
+local function awards()
+    local list = {}
+    for _, record in ipairs(core.history()) do
+        if not core.isOpenAward(record) then table.insert(list, record) end
+    end
+    return list
+end
+
 local function selectedRecord()
     local record = core.editing()
-    if record and core.findRecord(record.id) == record then return record end
+    if record and core.findRecord(record.id) == record and not core.isOpenAward(record) then return record end
     core.edit(nil)
 end
 
 local function drawList()
-    local history = core.history()
+    local history = awards()
     local total = table.getn(history)
-    awardOffset = math.max(0, math.min(awardOffset, total - AWARD_ROWS))
-    local held = 0
-    for _, record in ipairs(history) do
-        if record.state == "held" and ns.isPlayer(record.recipient) then held = held + 1 end
-    end
-    -- Items you still hold for their winners: they wait for a trade.
-    list.heading:SetText((total > AWARD_ROWS and string.format(L["AWARDS (%d, SCROLL)"], total) or string.format(L["AWARDS (%d)"], total))
-        .. (held > 0 and ("  |  " .. string.format(L["%d HELD BY YOU"], held)) or ""))
+    awardOffset = math.max(0, math.min(awardOffset, total - table.getn(awardRows)))
+    list.heading:SetText(total > table.getn(awardRows) and string.format(L["AWARDS (%d, SCROLL)"], total) or string.format(L["AWARDS (%d)"], total))
     local selected = selectedRecord()
     for i, row in ipairs(awardRows) do
         local record = history[i + awardOffset]
@@ -230,8 +251,8 @@ end
 local function drawLog(record)
     local log = record and record.rollLog
     local count = log and table.getn(log) or 0
-    logOffset = math.max(0, math.min(logOffset, count - LOG_ROWS))
-    logHeading:SetText(count > LOG_ROWS and string.format(L["ROLLS (%d, SCROLL)"], count) or string.format(L["ROLLS (%d)"], count))
+    logOffset = math.max(0, math.min(logOffset, count - table.getn(logRows)))
+    logHeading:SetText(count > table.getn(logRows) and string.format(L["ROLLS (%d, SCROLL)"], count) or string.format(L["ROLLS (%d)"], count))
     local winner = log and core.winningRoll(log)
     for i, row in ipairs(logRows) do
         local r = log and log[i + logOffset]
@@ -276,7 +297,7 @@ end
 local function drawDetail()
     local record = selectedRecord()
     local mayEdit = not ns.mayEdit or ns.mayEdit()
-    local controls = { changeButton, parkButton, deButton, bankButton, removeButton }
+    local controls = { changeButton, parkButton, removeButton }
     if not record then
         awardTitle:SetText(L["Select an award on the left"])
         nowLine:SetText(L["Here you change its recipient, its tally, or remove it."])
@@ -293,7 +314,9 @@ local function drawDetail()
     end
     awardTitle:SetText(string.format("#%d %s", record.id, record.item))
     local spec = record.spec and (core.SPEC_NAMES[record.spec] or record.spec) or L["no tally"]
-    nowLine:SetText(string.format(L["NOW: %s (%s)"], record.recipient, (stateText(record))) .. "  |  " .. spec
+    local state = stateText(record)
+    nowLine:SetText((state ~= "" and string.format(L["NOW: %s (%s)"], record.recipient, state)
+        or string.format(L["NOW: %s"], record.recipient)) .. "  |  " .. spec
         .. (record.roll and string.format(L["  |  roll %d"], record.roll) or ""))
     local deleted = record.state == "deleted"
     local countable = not deleted and not core.NO_TALLY[record.state] and record.spec ~= "boe"
@@ -304,11 +327,8 @@ local function drawDetail()
         button:GetFontString():SetTextColor(current and 0.55 or 0.70, current and 1.00 or 0.93, current and 0.65 or 1.00)
     end
     changeButton:SetText(deleted and L["RESTORE + SET"] or L["CHANGE RECIPIENT"])
-    parkButton:SetText(core.isOpenAward(record) and L["ROLL"] or L["PARK"])
     ns.setEnabled(changeButton, mayEdit)
     ns.setEnabled(parkButton, mayEdit and not deleted)
-    ns.setEnabled(deButton, mayEdit and not deleted)
-    ns.setEnabled(bankButton, mayEdit and not deleted)
     ns.setEnabled(removeButton, mayEdit and not deleted)
     drawLog(record)
 end
@@ -333,7 +353,7 @@ local function showView(view)
     end
 end
 
-local tab = ns.addTab("awards", function() return string.format(L["AWARDS (%d)"], table.getn(core.history())) end, panel, refresh,
+local tab = ns.addTab("awards", function() return string.format(L["AWARDS (%d)"], table.getn(awards())) end, panel, refresh,
     "RaidLedgerTabButtonAwards")
 tab.view = showView
 ns.tip(tab.button, L["Every award of this raid: change recipient or tally, remove, export for the website"])
@@ -343,8 +363,8 @@ function ns.showAward(record)
     core.edit(record)
     recipientBox:SetText(record and record.recipient or "")
     logOffset = 0
-    for i, r in ipairs(core.history()) do
-        if r == record then awardOffset = math.max(0, i - math.floor(AWARD_ROWS / 2)) end
+    for i, r in ipairs(awards()) do
+        if r == record then awardOffset = math.max(0, i - math.floor(table.getn(awardRows) / 2)) end
     end
     ui.show("awards")
     showView(nil)
@@ -365,7 +385,9 @@ for _, row in ipairs(awardRows) do
         local record = self.record
         if not record then return end
         ns.itemTooltip(self, record.item)
-        GameTooltip:AddLine(string.format(L["Award #%d: %s (%s)"], record.id, record.recipient, (stateText(record))), 1, 1, 1)
+        local state = stateText(record)
+        GameTooltip:AddLine(state ~= "" and string.format(L["Award #%d: %s (%s)"], record.id, record.recipient, state)
+            or string.format(L["Award #%d: %s"], record.id, record.recipient), 1, 1, 1)
         if record.roll then
             GameTooltip:AddLine(string.format(L["Roll %d, %s"], record.roll, record.spec and core.rollLabel({
                 kind = record.spec, low = record.low, high = record.high }) or L["spec unknown"]), 0.8, 0.8, 0.8)
@@ -419,15 +441,7 @@ changeButton:SetScript("OnClick", function()
 end)
 parkButton:SetScript("OnClick", function()
     local record = selectedRecord()
-    if record then roster.parkRecord(record, recipientBox:GetText()) end
-end)
-deButton:SetScript("OnClick", function()
-    local record = selectedRecord()
-    if record then roster.giveAwayRecord(record, "disenchanted", recipientBox:GetText()) end
-end)
-bankButton:SetScript("OnClick", function()
-    local record = selectedRecord()
-    if record then roster.giveAwayRecord(record, "bank", recipientBox:GetText()) end
+    if record and roster.parkRecord(record, "") then ui.show("loot") end
 end)
 removeButton:SetScript("OnClick", function()
     local record = selectedRecord()
@@ -467,13 +481,7 @@ ns.tip(changeButton, function()
     local record = selectedRecord()
     return record and record.state == "deleted" and L["Restore the award for the name in the box"] or L["Give this award to the name in the box"]
 end)
-ns.tip(parkButton, function()
-    local record = selectedRecord()
-    return record and core.isOpenAward(record) and L["Start the roll for this open item"]
-        or L["Park it with the name in the box (or its holder) until it is rolled"]
-end)
-ns.tip(deButton, L["Disenchant: give it to the name in the box (or keep it); counts for nobody"])
-ns.tip(bankButton, L["Guild bank: give it to the name in the box (or keep it); counts for nobody"])
+ns.tip(parkButton, L["Back to BEUTE as an open item with whoever holds it: roll it again or hand it out there"])
 ns.tip(removeButton, L["Remove the award (the export keeps it as removed)"])
 ns.tip(raidBox, L["The raid's ID on the website (in its address)"])
 ns.tip(backButton, L["Back to the awards"])
@@ -490,8 +498,6 @@ events:SetScript("OnEvent", function()
         ForgeTestBridge:RegisterFrame("RaidLedgerChangeRecipient", changeButton)
         ForgeTestBridge:RegisterFrame("RaidLedgerHistory1Recipient", awardRows[1].columns[2])
         ForgeTestBridge:RegisterFrame("RaidLedgerAwardPark", parkButton)
-        ForgeTestBridge:RegisterFrame("RaidLedgerAwardDE", deButton)
-        ForgeTestBridge:RegisterFrame("RaidLedgerAwardBank", bankButton)
         ForgeTestBridge:RegisterFrame("RaidLedgerRemove", removeButton)
         ForgeTestBridge:RegisterFrame("RaidLedgerAwardLogHeading", logHeading)
         for _, button in ipairs(specButtons) do ForgeTestBridge:RegisterFrame("RaidLedgerSpec" .. button.spec, button) end
