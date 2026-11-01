@@ -84,6 +84,28 @@ list without them (`RS2;INV;<raid ID>;<raid name>;<size>`) is still read.
 Both are `;`-separated like the loot export. RaidSync's `RS1|INV` lists are not
 read: export the list again on the website.
 
+**Whisper invites:** **WHISPER INVITES** in RAID lets a player on the list
+whisper you the word in the box beside it for an invite, for example after a
+disconnect. The word is `inv` unless you type another. It is off by default.
+Bench players count only with **BENCH: YES**. Anyone not on the list and any
+other whisper are ignored without an answer.
+
+## Loot method button
+
+Master loot is for bosses and group loot for the rest, so the leader of a party
+or raid gets a small red button when the method does not fit, inside an
+instance: in a boss fight without master loot ("! LOOT: GROUP > MASTER") and
+outside a boss fight with master loot ("! LOOT: MASTER > GROUP"). A boss fight
+is a boss unit, or being in combat while you or a group member target a boss;
+it ends when you leave combat. A click switches the method and the button goes
+away once the client confirms it; drag it to move it. Right after a kill it
+asks for group loot: switch once the corpse is looted. RaidLedger never changes
+the loot method on its own.
+
+**LOOT BUTTON** in EINSTELLUNGEN (or `/ledger lootbutton on|off`) switches it
+off. `/ledger lootbutton show` shows it whatever the method, until the next
+`on`, `off` or `/reload`.
+
 ## Rolls
 
 Opening a loot window lists every item at or above the group's loot threshold.

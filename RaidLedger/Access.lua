@@ -206,11 +206,15 @@ centerButton:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -232)
 local syncButton = ns.flatButton(panel, L["SYNC AWARDS"], 136, "RaidLedgerSync")
 syncButton:SetHeight(20)
 syncButton:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -256)
+local lootButtonOption = ns.flatButton(panel, L["LOOT BUTTON: ON"], 136, "RaidLedgerLootButtonOption")
+lootButtonOption:SetHeight(20)
+lootButtonOption:SetPoint("TOPLEFT", panel, "TOPRIGHT", OPTIONS_X, -280)
 
 function ns.refreshOptions()
     if not rollBox:HasFocus() then rollBox:SetText(tostring(ns.core.rollSeconds())) end
     if not tieBox:HasFocus() then tieBox:SetText(tostring(ns.core.tieSeconds())) end
     minimapButton:SetText(ns.ensureDatabase().minimapHidden and L["MINIMAP: OFF"] or L["MINIMAP: ON"])
+    lootButtonOption:SetText(ns.ensureDatabase().lootButtonHidden and L["LOOT BUTTON: OFF"] or L["LOOT BUTTON: ON"])
     scaleValue:SetText(string.format("%d%%", math.floor(ns.ui.scale() * 100 + 0.5)))
 end
 
@@ -235,6 +239,9 @@ centerButton:SetScript("OnClick", function() ns.ui.resetPosition() ns.refreshOpt
 scaleUp:SetScript("OnClick", function() ns.ui.setScale(ns.ui.scale() + 0.1) ns.refreshOptions() end)
 scaleDown:SetScript("OnClick", function() ns.ui.setScale(ns.ui.scale() - 0.1) ns.refreshOptions() end)
 syncButton:SetScript("OnClick", function() ns.core.sync() end)
+lootButtonOption:SetScript("OnClick", function()
+    ns.commands.lootbutton(ns.ensureDatabase().lootButtonHidden and "on" or "off")
+end)
 ns.tip(rollBox, L["How long a roll runs; reminders come at half and a quarter of it"])
 ns.tip(tieBox, L["How long a tie-break runs"])
 ns.tip(timerButton, L["Use these lengths for the next rolls (a running roll keeps its time)"])
@@ -243,6 +250,7 @@ ns.tip(centerButton, L["Move this window back to the middle of the screen, at it
 ns.tip(scaleUp, L["Make the window larger (up to 150%)"])
 ns.tip(scaleDown, L["Make the window smaller (down to 60%)"])
 ns.tip(syncButton, L["Ask the group's other ledgers for this raid's awards (e.g. after a crash)"])
+ns.tip(lootButtonOption, L["Show a button when the loot method does not fit a boss fight"])
 
 local function userOf(name)
     if ns.isPlayer(name) then return { name = name, ledger = VERSION, editor = ns.mayEdit() } end
