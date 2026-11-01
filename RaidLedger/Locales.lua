@@ -365,6 +365,28 @@ L["Empty: everyone may, as before. Click a name to remove it. Shared with the gr
 L["ADD"] = "HINZUFÜGEN"
 L["+ TARGET"] = "+ ZIEL"
 L["CHECK"] = "PRÜFEN"
+L["LOOT: GROUP"] = "BEUTE: GRUPPE"
+L["LOOT: MASTER"] = "BEUTE: PLÜNDERMEISTER"
+L["LOOT: MASTER (%s)"] = "BEUTE: PLÜNDERMEISTER (%s)"
+L["LOOT: OTHER"] = "BEUTE: ANDERE"
+L["! LOOT: GROUP > MASTER"] = "! BEUTE: GRUPPE > PLÜNDERMEISTER"
+L["! LOOT: MASTER > GROUP"] = "! BEUTE: PLÜNDERMEISTER > GRUPPE"
+L["! LOOT: OTHER > MASTER"] = "! BEUTE: ANDERE > PLÜNDERMEISTER"
+L["Click to switch between master loot and group loot; drag to move"] =
+    "Klick wechselt zwischen Plündermeister und Gruppenplündern; ziehen verschiebt"
+L["LOOT BUTTON: ON"] = "BEUTE-KNOPF: AN"
+L["LOOT BUTTON: OFF"] = "BEUTE-KNOPF: AUS"
+L["Show a button when the loot method does not fit a boss fight"] =
+    "Zeigt einen Knopf, wenn die Beuteart nicht zum Bosskampf passt"
+L["usage: /ledger lootbutton on|off|show"] = "Verwendung: /ledger lootbutton on|off|show"
+L["/ledger lootbutton on|off|show - the loot method button"] =
+    "/ledger lootbutton on|off|show - der Knopf für die Beuteart"
+L["WHISPER INVITES: ON"] = "FLÜSTER-EINLADUNG: AN"
+L["WHISPER INVITES: OFF"] = "FLÜSTER-EINLADUNG: AUS"
+L["Invite listed players who whisper you the word in the box"] =
+    "Spieler von der Liste einladen, die dir das Wort aus dem Feld flüstern"
+L["The word players whisper you for an invite (empty: inv)"] =
+    "Das Wort, das Spieler dir für eine Einladung flüstern (leer: inv)"
 L["Green: RaidLedger (version)  |  blue: RaidWishlist only  |  grey: no addon  |  gold: editor"] =
     "Grün: RaidLedger (Version)  |  blau: nur RaidWishlist  |  grau: kein Addon  |  gold: freigegeben"
 L["No editors: everyone may change the ledger."] = "Keine Freigabeliste: alle dürfen ändern."

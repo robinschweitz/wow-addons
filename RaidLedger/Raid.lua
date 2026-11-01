@@ -14,6 +14,7 @@ local FORMAT = "RS2"
 local INVITE_DELAY = 0.3    -- seconds between invites
 local INVITE_EXPIRY = 65    -- an unanswered invite stops reserving a party slot
 local MEMBER_HEIGHT = 15   -- the member list's row height
+local WHISPER_WORD = "inv"  -- the whisper that asks for an invite, unless the raid lead chose another
 
 local STATUS_LABELS = {
     open = L["open"], invited = L["invited"], joined = L["in raid"], declined = L["declined"],
@@ -152,7 +153,7 @@ end
 
 local function canManageGroup()
     if (GetNumRaidMembers() or 0) > 0 then return IsRaidLeader() or IsRaidOfficer() end
-    if (GetNumPartyMembers() or 0) > 0 then return IsPartyLeader() end
+    if (GetNumPartyMembers() or 0) > 0 then return IsPartyLeader("player") end
     return true
 end
 
@@ -243,15 +244,24 @@ benchButton:SetPoint("TOPLEFT", readButton, "BOTTOMLEFT", 0, -6)
 local calendarButton = ns.flatButton(panel, L["CALENDAR EVENT"], 154, "RaidLedgerCalendar")
 calendarButton:SetHeight(20)
 calendarButton:SetPoint("LEFT", benchButton, "RIGHT", 6, 0)
+local whisperButton = ns.flatButton(panel, L["WHISPER INVITES: OFF"], 170, "RaidLedgerWhisperInvites")
+whisperButton:SetHeight(20)
+whisperButton:SetPoint("TOPLEFT", benchButton, "BOTTOMLEFT", 0, -4)
+local whisperBox = CreateFrame("EditBox", "RaidLedgerWhisperWord", panel, "InputBoxTemplate")
+whisperBox:SetPoint("LEFT", whisperButton, "RIGHT", 12, 0)
+whisperBox:SetWidth(118)
+whisperBox:SetHeight(20)
+whisperBox:SetAutoFocus(false)
+whisperBox:SetMaxLetters(20)
 
 local attendanceHeading = ns.label(panel, "GameFontNormal", 10, {1.00, 0.80, 0.32})
-attendanceHeading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -212)
+attendanceHeading:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -236)
 attendanceHeading:SetText(L["ATTENDANCE FOR THE WEBSITE"])
 local attendanceButton = ns.flatButton(panel, L["EXPORT"], 70)
 _G.RaidLedgerAttendance = attendanceButton
 attendanceButton:SetHeight(20)
-attendanceButton:SetPoint("TOPRIGHT", panel, "TOPLEFT", 312, -206)
-local ROSTER_TOP = -234
+attendanceButton:SetPoint("TOPRIGHT", panel, "TOPLEFT", 312, -230)
+local ROSTER_TOP = -258
 local rosterText = textArea("RaidLedgerRosterText", ROSTER_TOP)
 rosterText:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
 -- Read-only: typing restores the generated text.
@@ -331,6 +341,8 @@ local function updatePanel()
         end
     end
     benchButton:SetText(data.includeBench and L["BENCH: YES"] or L["BENCH: NO"])
+    whisperButton:SetText(data.whisperInvites and L["WHISPER INVITES: ON"] or L["WHISPER INVITES: OFF"])
+    if not whisperBox:HasFocus() then whisperBox:SetText(data.whisperWord or WHISPER_WORD) end
 end
 
 listBack:SetScript("OnMouseWheel", function(_, delta)
@@ -404,7 +416,7 @@ end
 
 local function inviteStep()
     if (GetNumRaidMembers() or 0) == 0 then
-        if (GetNumPartyMembers() or 0) > 0 and IsPartyLeader() and not convertFailed then
+        if (GetNumPartyMembers() or 0) > 0 and IsPartyLeader("player") and not convertFailed then
             -- More than five players need a raid; convert once someone joined.
             -- The server ignores it while someone is below level 10: then keep
             -- inviting into the party as long as there is room.
@@ -433,6 +445,37 @@ local function inviteStep()
     InviteUnit(member.name)
     inviteDelay = INVITE_DELAY
     updatePanel()
+end
+
+-- An emptied box means the default word again.
+local function whisperWord()
+    local word = ns.lower(ns.trim(setup().whisperWord or ""))
+    return word ~= "" and word or WHISPER_WORD
+end
+
+-- onWhisper invites a listed player who asks with the exact word. The sender
+-- comes from the event; every other whisper is ignored without an answer.
+local function onWhisper(text, sender)
+    local data = setup()
+    if not data.whisperInvites or ns.lower(ns.trim(text or "")) ~= whisperWord() or not canManageGroup() then return end
+    local key = ns.lower(sender or "")
+    if groupNames()[key] then return end
+    pendingInvites()    -- an invite that ran out may be asked for again
+    for _, member in ipairs(data.members) do
+        if ns.lower(member.name) == key then
+            if member.status == "invited" or (member.bench and not data.includeBench) then return end
+            for _, queued in ipairs(queue) do
+                if queued == member then return end
+            end
+            table.insert(queue, member)
+            if not inviting then
+                inviting, inviteDelay = true, 0
+                convertTries, convertFailed = 0, false
+            end
+            updatePanel()
+            return
+        end
+    end
 end
 
 -- recordAttendance remembers everyone in the raid and since when, so late
@@ -693,6 +736,7 @@ raidTab.view = function() inviteText:SetText(setup().text or "") end
 panel:SetScript("OnHide", function()
     inviteText:ClearFocus()
     rosterText:ClearFocus()
+    whisperBox:ClearFocus()
 end)
 local function showPanel() ns.ui.show("raid") end
 inviteText:SetScript("OnTextChanged", function(self) setup().text = self:GetText() end)
@@ -708,6 +752,18 @@ benchButton:SetScript("OnClick", function()
     end
     updatePanel()
 end)
+whisperButton:SetScript("OnClick", function()
+    local data = setup()
+    data.whisperInvites = not data.whisperInvites or nil
+    updatePanel()
+end)
+whisperBox:SetScript("OnTextChanged", function(self)
+    local word = ns.trim(self:GetText() or "")
+    setup().whisperWord = word ~= "" and word or nil
+end)
+whisperBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+whisperBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+whisperBox:SetScript("OnEditFocusLost", updatePanel)
 attendanceButton:SetScript("OnClick", exportAttendance)
 sortButton:SetScript("OnClick", sortGroups)
 calendarButton:SetScript("OnClick", createCalendarEvent)
@@ -743,15 +799,120 @@ local function onSystemMessage(message)
     end
 end
 
+local function currentMasterLooterName()
+    local method, partyMaster, raidMaster = GetLootMethod()
+    if method ~= "master" then return end
+    if (GetNumRaidMembers() or 0) > 0 and raidMaster then return UnitName("raid" .. raidMaster) end
+    if (GetNumPartyMembers() or 0) > 0 and partyMaster ~= nil then
+        return UnitName(partyMaster == 0 and "player" or "party" .. partyMaster)
+    end
+end
+
+---------------------------------------------------------------------------
+-- Loot method button (FR-RL-019, FR-RL-021): the leader's reminder and
+-- one-click switch, shown only while the method does not fit: master loot in
+-- a boss fight, anything else outside one.
+---------------------------------------------------------------------------
+local lootButton = ns.flatButton(UIParent, L["LOOT: GROUP"], 240, "RaidLedgerLootMethod")
+lootButton:SetHeight(22)
+lootButton:SetPoint("TOP", UIParent, "TOP", 0, -60)
+lootButton:SetMovable(true)
+lootButton:SetClampedToScreen(true)
+lootButton:RegisterForDrag("LeftButton")
+lootButton:SetScript("OnDragStart", function(self) self:StartMoving() end)
+lootButton:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+lootButton:Hide()
+local inBossFight, lootForced
+
+local function isGroupLeader()
+    if (GetNumRaidMembers() or 0) > 0 then return IsRaidLeader() end
+    return (GetNumPartyMembers() or 0) > 0 and IsPartyLeader("player")
+end
+
+-- A boss fight is a boss unit, or combat while the player or a group member
+-- targets a boss. It lasts until combat ends, so turning to an add keeps it.
+local function bossTargeted()
+    if UnitClassification("target") == "worldboss" then return true end
+    local prefix, count = "raid", GetNumRaidMembers() or 0
+    if count == 0 then prefix, count = "party", GetNumPartyMembers() or 0 end
+    for i = 1, count do
+        if UnitClassification(prefix .. i .. "target") == "worldboss" then return true end
+    end
+    return false
+end
+
+local function readBossFight()
+    for i = 1, 4 do
+        if UnitExists("boss" .. i) then
+            inBossFight = true
+            return
+        end
+    end
+    if not UnitAffectingCombat("player") then
+        inBossFight = false
+    elseif bossTargeted() then
+        inBossFight = true
+    end
+end
+
+local LOOT_TEXTS = { group = L["LOOT: GROUP"], master = L["LOOT: MASTER"] }
+local LOOT_CHANGES = {
+    group = L["! LOOT: GROUP > MASTER"], master = L["! LOOT: MASTER > GROUP"], other = L["! LOOT: OTHER > MASTER"],
+}
+
+-- The button shows only while the method does not fit. Its text and
+-- its hiding come from the client, so it never claims a change the server
+-- refused.
+local function updateLootButton()
+    readBossFight()
+    local method = GetLootMethod()
+    local wrong = IsInInstance() and (inBossFight and method ~= "master" or not inBossFight and method == "master")
+    if ns.ensureDatabase().lootButtonHidden or not isGroupLeader() or not (wrong or lootForced) then
+        lootButton:Hide()
+        return
+    end
+    if wrong then
+        lootButton:SetText(LOOT_CHANGES[method] or LOOT_CHANGES.other)
+        lootButton:SetBackdropColor(0.55, 0.10, 0.08, 0.98)
+    else
+        local master = method == "master" and currentMasterLooterName()
+        lootButton:SetText((master and not ns.isPlayer(master)) and string.format(L["LOOT: MASTER (%s)"], master)
+            or LOOT_TEXTS[method] or L["LOOT: OTHER"])
+        local c = lootButton.baseColor
+        lootButton:SetBackdropColor(c[1], c[2], c[3], 0.98)
+    end
+    lootButton:Show()
+end
+
+-- The master looter is named: the client reads the argument as a player name,
+-- so "player" would not work (live run 62c8ab7d3742).
+lootButton:SetScript("OnClick", function()
+    if GetLootMethod() == "master" then
+        SetLootMethod("group")
+    else
+        SetLootMethod("master", UnitName("player"))
+    end
+end)
+
 local events = CreateFrame("Frame")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("CHAT_MSG_SYSTEM")
 events:RegisterEvent("RAID_ROSTER_UPDATE")
 events:RegisterEvent("PARTY_MEMBERS_CHANGED")
+events:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
+events:RegisterEvent("PARTY_LEADER_CHANGED")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
+events:RegisterEvent("PLAYER_TARGET_CHANGED")
+events:RegisterEvent("PLAYER_REGEN_ENABLED")
+events:RegisterEvent("PLAYER_REGEN_DISABLED")
+events:RegisterEvent("UNIT_TARGET")
+events:RegisterEvent("INSTANCE_ENCOUNTER_ENGAGE_UNIT")
+events:RegisterEvent("CHAT_MSG_WHISPER")
 events:SetScript("OnEvent", function(_, event, ...)
     if event == "PLAYER_LOGIN" then
         setup()
         updatePanel()
+        updateLootButton()
         if ForgeTestBridge and ForgeTestBridge.RegisterFrame then
             ForgeTestBridge:RegisterFrame("RaidLedgerRaidButton", raidButton)
             ForgeTestBridge:RegisterFrame("RaidLedgerRaidPanel", panel)
@@ -763,12 +924,22 @@ events:SetScript("OnEvent", function(_, event, ...)
             ForgeTestBridge:RegisterFrame("RaidLedgerRosterText", rosterText)
             ForgeTestBridge:RegisterFrame("RaidLedgerRaidStatus", listHeading)
             ForgeTestBridge:RegisterFrame("RaidLedgerRaidMember1", memberRows[1].state)
+            ForgeTestBridge:RegisterFrame("RaidLedgerLootMethod", lootButton)
         end
     elseif event == "CHAT_MSG_SYSTEM" then
         onSystemMessage(...)
-
+    elseif event == "CHAT_MSG_WHISPER" then
+        onWhisper(...)
+    elseif event == "PARTY_LOOT_METHOD_CHANGED" or event == "PARTY_LEADER_CHANGED"
+        or event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_TARGET_CHANGED"
+        or event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED"
+        or event == "INSTANCE_ENCOUNTER_ENGAGE_UNIT" then
+        updateLootButton()
+    elseif event == "UNIT_TARGET" then
+        if UnitAffectingCombat("player") then updateLootButton() end
     else
         updateGroupStatus()
+        updateLootButton()
     end
 end)
 events:SetScript("OnUpdate", function(_, elapsed)
@@ -786,6 +957,9 @@ ns.tip(inviteButton, L["Invite everyone on the list who is not in the raid yet"]
 ns.tip(retryButton, L["Invite again whoever was offline, declined or did not answer"])
 ns.tip(benchButton, L["Also invite the players the website put on the bench"])
 ns.tip(calendarButton, L["Create a calendar raid event for the list's date and time, everyone on it invited"])
+ns.tip(whisperButton, L["Invite listed players who whisper you the word in the box"])
+ns.tip(whisperBox, L["The word players whisper you for an invite (empty: inv)"])
+ns.tip(lootButton, L["Click to switch between master loot and group loot; drag to move"])
 ns.tip(attendanceButton, L["Who was in the raid, for the website's roster import"])
 ns.tip(rosterText, L["Ctrl+C copies the attendance; paste it into the website"])
 ns.tip(sortButton, L["Sort the raid groups: tanks, healers, then the rest"])
@@ -793,6 +967,20 @@ ns.tip(sortButton, L["Sort the raid groups: tanks, healers, then the rest"])
 ns.commands.setup = function() showPanel(true) end
 ns.commands.invite = function(rest) startInvites(ns.lower(rest) == "missing") end
 ns.commands.groups = sortGroups
+ns.commands.lootbutton = function(rest)
+    rest = ns.lower(ns.trim(rest or ""))
+    if rest == "show" then
+        lootForced = true
+    elseif rest == "on" or rest == "off" then
+        lootForced = nil
+        ns.ensureDatabase().lootButtonHidden = rest == "off" or nil
+    else
+        ns.say(L["usage: /ledger lootbutton on|off|show"])
+        return
+    end
+    updateLootButton()
+    ns.refreshOptions()
+end
 ns.commands.calendar = function() createCalendarEvent() end
 ns.commands.attendance = function()
     showPanel(true)
@@ -803,3 +991,4 @@ table.insert(ns.help, L["/ledger invite [missing] - invite the website's list (o
 table.insert(ns.help, L["/ledger groups - sort raid groups: tanks, healers, the rest"])
 table.insert(ns.help, L["/ledger calendar - calendar raid event from the invite list, everyone on it invited"])
 table.insert(ns.help, L["/ledger attendance - export who was in the raid for the website"])
+table.insert(ns.help, L["/ledger lootbutton on|off|show - the loot method button"])
