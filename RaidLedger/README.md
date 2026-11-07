@@ -17,7 +17,7 @@ keyed by their English wording.
 
 ## The window
 
-One window with five tabs (2.5.0, after the raid feedback "cleaner, easier,
+One window with tabs (2.5.0, after the raid feedback "cleaner, easier,
 everything in the UI"); each tab owns the full height, so long lists stay
 readable. Every button and field has a tooltip. Chat commands still work, but
 none is needed.
@@ -27,6 +27,7 @@ none is needed.
 | **BEUTE** (loot) | The loot list (this corpse's drops, then the open items held until they are rolled), the raid's **disenchanter** below it, and the selected item in two steps: **1 ROLL** (**ROLL**, free BoE roll for BoE items, every roll with what the roller has **so far**) and **2 HAND OUT** (name box, **ALL**, **GIVE TO name**, **DISENCHANT**, **GUILD BANK**). The button for the next step is green. The compact master-loot popup has **ASSIGN**, **ROLL** and **LATER ROLL**. |
 | **VERGABEN** (awards) | Every award; the selected one is only corrected: **COUNTS AS** main spec / off spec / nothing, change or restore its recipient, **BACK TO LOOT**, **REMOVE**, its roll log; **EXPORT** and **NEW RAID** |
 | **SPIELER** (players' tally) | Every raid member with items and tokens per spec, the numbers the fewest-items rule ranks by; - / + corrections per player, and their awards |
+| **VERLAUF** (history, 2.10.0) | The finished raids, newest first, with date, recorder, raid ID and award count; the selected raid's tally, and **SHOW AWARDS**, **SHARE**, **CONTINUE**, **DELETE**; **KEEP** sets how many raids stay |
 | **RAID** | Invites, raid groups, attendance, calendar event |
 | **EINSTELLUNGEN** (settings) | Editors, who runs which addon, roll lengths, minimap button, window scale and reset, sync |
 
@@ -274,9 +275,19 @@ roll, for items on their wishlist.
 
 After a crash the master looter's client may have lost the ledger: on login (or
 with `/ledger sync`) it asks the group, and the others send their own awards
-plus the asker's, which restores it. Messages are only accepted from group
+plus the asker's, which restores it. Since 2.10.0 a ledger also passes on
+the awards of ledgers that are not in the group (for example the master
+looter of a raid that continues on another day). Messages are only accepted from group
 members, at most four are sent per second, and the newest revision of an award
 wins.
+
+A ledger with awards of its own never merges another raid's awards. When
+another raid's awards arrive (2.10.0), they are kept under **VERLAUF** beside
+yours, chat says whose raid it is, and a question asks whether to make it your
+current raid, for example when a raid continues on another day with another
+character. Nothing switches without **YES**: then your raid goes to VERLAUF,
+theirs becomes the current one, and the group is asked again. The question
+comes once per raid, and again after each `/ledger sync` or **SYNC AWARDS**.
 
 ## Roll log
 
@@ -350,12 +361,29 @@ rank, with Enhanced), and a roller who listed the item shows `[WL #rank]` in
 the roll list. The lists are kept only until you log out or `/reload`; the
 ledger then asks again.
 
-## Clearing old loot
+## New raid and raid history
 
-**NEW RAID** (in VERGABEN) and `/ledger newraid` ask first, then empty the
-award ledger, the tally corrections and the raid ID. Export before clearing.
-`/ledger newraid confirm` clears without asking. **EMPTY** in the loot list
-only drops the loot not handed out yet (`/ledger clear`).
+**NEW RAID** (in VERGABEN) and `/ledger newraid` ask first, then start an
+empty award list. Since 2.10.0 the finished raid is not deleted: it is kept
+under **VERLAUF** with its awards, roll logs, tally corrections, raid ID and
+disenchanter. `/ledger newraid confirm` starts without asking. **EMPTY** in the
+loot list only drops the loot not handed out yet (`/ledger clear`).
+
+In **VERLAUF** select a raid to see its tally. **SHOW AWARDS** opens its awards
+in VERGABEN (the heading names the raid; **CURRENT RAID** leads back): editors
+correct them there as usual, the correction goes to the group, and only
+ledgers that hold that raid apply it. **EXPORT** there builds that raid's
+website export. **CONTINUE** asks, then makes the raid the current one again
+(a raid that goes on another evening); the current raid moves to VERLAUF, and
+RaidWishlist users are asked whether to follow it. **DELETE** asks, then
+removes the raid from your ledger only; the others keep their copy. **SHARE**
+sends the raid's awards and roll logs to the group (four messages a second, so
+a big raid takes a while): their ledgers keep it under VERLAUF, or add it to
+their current raid when it is that raid, and say who shared it; they never
+switch raids. RaidWishlist keeps it as a past raid. **KEEP**
+(or `/ledger keep <number>`) sets how many finished raids stay (20 by default,
+no upper limit); the oldest go first. Rolls and the SPIELER tally count only
+the current raid.
 
 ## Corrections
 
@@ -384,6 +412,7 @@ commands do the same:
 | `/ledger minimap on` / `off` | Show / hide the minimap button |
 | `/ledger tally` | Items per player this raid |
 | `/ledger sync` | Ask the group's ledgers for this raid's awards |
+| `/ledger keep <number>` | How many finished raids VERLAUF keeps |
 
 A removed award can be restored by setting a recipient again.
 
@@ -391,7 +420,8 @@ A removed award can be restored by setting a recipient again.
 
 **EXPORT** in VERGABEN (or `/ledger export`) shows the export: type the
 website's raid ID (or `/ledger raid <id>`) and copy the selected text with
-Ctrl+C. **NEW RAID** empties the ledger and forgets the raid ID; export first.
+Ctrl+C. **NEW RAID** starts an empty list without a raid ID; the finished
+raid keeps its own and can still be exported from **VERLAUF**.
 
 ```text
 RS2;LOOT;42;Raidleader;1760000000;1760003600
