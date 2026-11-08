@@ -183,8 +183,9 @@ local function drawDetail()
         return
     end
     raidTitle:SetText(core.raidLabel(raid))
-    infoLine:SetText(string.format(L["recorded by %s  |  %d awards  |  raid ID %s"], raid.recorder or "?",
-        awardCount(raid), raid.raidID and tostring(raid.raidID) or "-"))
+    local n = awardCount(raid)
+    infoLine:SetText(string.format(L["recorded by %s  |  %s  |  raid ID %s"], raid.recorder or "?",
+        n == 1 and L["1 award"] or string.format(L["%d awards"], n), raid.raidID and tostring(raid.raidID) or "-"))
     local lines = tallyLines(raid)
     tallyOffset = math.max(0, math.min(tallyOffset, table.getn(lines) - table.getn(tallyRows)))
     tallyHeading:SetText(string.format(L["TALLY OF THIS RAID (%d)"], table.getn(lines)))
