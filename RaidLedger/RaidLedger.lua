@@ -816,7 +816,7 @@ local function captureMasterLoot()
     for slot = 1, count do
         if handedSlots[slot] and handedSlots[slot] == GetLootSlotLink(slot) then
             -- Handed out, not emptied yet: it is no copy left on the source.
-            changed = oldSlots[slot] ~= nil
+            changed = changed or oldSlots[slot] ~= nil
         else
             handedSlots[slot] = nil
             addMasterLootItem(slot, seen)
@@ -1525,6 +1525,15 @@ local function finishRoll(entry)
     if activeRollCount(entry) == 0 then
         entry.nobody = true
         announce(string.format(L["[Loot] %s - nobody wanted it."], entry.item))
+        -- Open tokens are still with their holders: back to OPEN ITEMS (FR-RL-016).
+        if entry.records then
+            for index = table.getn(active), 1, -1 do
+                if active[index] == entry then table.remove(active, index) end
+            end
+            if selected == entry then selected = nil end
+            ui.refresh()
+            return
+        end
         -- Nobody needs a BoE item for this character: offer it to everyone.
         if not entry.free and isBindOnEquip(entry.item) then
             local dialog = StaticPopup_Show("RAIDLEDGER_FREE_ROLL", entry.item, nil, entry)
