@@ -142,14 +142,23 @@ L["Choose or enter a recipient name."] = "Empfänger anklicken oder Namen eingeb
 L["Award #%d recorded for %s."] = "Vergabe #%d für %s erfasst."
 L["Enter the website's raid ID to build the export."] = "Raid-ID der Webseite eingeben, dann entsteht der Export."
 L["Export selected: press Ctrl+C and paste it into the raid website's loot import."] = "Export markiert: Strg+C drücken und im Loot-Import der Raid-Webseite einfügen."
-L["Clear all recorded loot and start a new raid? Export it first."] = "Alle erfassten Vergaben löschen und einen neuen Raid beginnen? Vorher exportieren."
+L["Start a new raid? The current raid is kept under HISTORY."] = "Neuen Raid beginnen? Der aktuelle Raid bleibt unter VERLAUF erhalten."
 
 -- Chat
 L["no award #%s."] = "keine Vergabe #%s."
 L["give a name or target the recipient."] = "Namen angeben oder den Empfänger anvisieren."
-L["%s shares another raid's ledger; yours has its own awards, so it is not merged. Use CLEAR to follow theirs."] =
-    "%s teilt das Buch eines anderen Raids; deins hat eigene Vergaben und wird nicht zusammengeführt. Mit LEEREN folgst du dem anderen."
-L["new raid: the award ledger is empty."] = "neuer Raid: das Buch ist leer."
+L["%s's ledger holds another raid; it is kept under HISTORY. Yours stays the current raid."] =
+    "Das Buch von %s gehört zu einem anderen Raid; er wird unter VERLAUF gespeichert. Dein Raid bleibt der aktuelle."
+L["%s's ledger holds another raid. Make it your current raid? Yours is kept under HISTORY."] =
+    "Das Buch von %s gehört zu einem anderen Raid. Zu deinem aktuellen Raid machen? Deiner bleibt unter VERLAUF erhalten."
+L["now following %s's raid; asked the group for its awards."] = "folgt jetzt dem Raid von %s; die Gruppe wurde nach dessen Vergaben gefragt."
+L["new raid: the award ledger is empty; the last raid is kept under HISTORY."] = "neuer Raid: das Buch ist leer; der letzte Raid bleibt unter VERLAUF erhalten."
+L["raid of %s deleted from your ledger."] = "Raid vom %s aus deinem Buch gelöscht."
+L["the raid of %s is the current raid again."] = "der Raid vom %s ist wieder der aktuelle Raid."
+L["HISTORY keeps the last %d raids."] = "VERLAUF behält die letzten %d Raids."
+L["usage: /ledger keep <number> (at least 1)"] = "Aufruf: /ledger keep <Anzahl> (mindestens 1)"
+L["Continue the raid of %s? The current raid is kept under HISTORY."] = "Den Raid vom %s fortsetzen? Der aktuelle Raid bleibt unter VERLAUF erhalten."
+L["Delete the raid of %s from your ledger? Other players keep their copy."] = "Den Raid vom %s aus deinem Buch löschen? Die anderen Spieler behalten ihre Kopie."
 L["usage: /ledger set <#> [name]"] = "Aufruf: /ledger set <#> [Name]"
 L["usage: /ledger del <#>"] = "Aufruf: /ledger del <#>"
 L["usage: /ledger spec <#> ms|os|none"] = "Aufruf: /ledger spec <#> ms|os|none"
@@ -190,8 +199,9 @@ L["/ledger tally - items per player this raid (main spec / off spec)"] = "/ledge
 L["/ledger raid <id> - set the website raid ID"] = "/ledger raid <ID> - Raid-ID der Webseite setzen"
 L["/ledger export - show the website export"] = "/ledger export - Export für die Webseite zeigen"
 L["/ledger sync - ask the group's other ledgers for this raid's awards"] = "/ledger sync - andere Bücher der Gruppe nach den Vergaben fragen"
-L["/ledger newraid (or CLEAR) - empty the award ledger for the next raid; add confirm to skip the question"] =
-    "/ledger newraid (oder LEEREN) - Buch für den nächsten Raid leeren; mit confirm ohne Rückfrage"
+L["/ledger newraid (or CLEAR) - start the next raid, the last one is kept under HISTORY; add confirm to skip the question"] =
+    "/ledger newraid (oder LEEREN) - nächsten Raid beginnen, der letzte bleibt unter VERLAUF; mit confirm ohne Rückfrage"
+L["/ledger keep <number> - how many finished raids HISTORY keeps"] = "/ledger keep <Anzahl> - wie viele beendete Raids VERLAUF behält"
 L["/ledger clear - drop all active rolls;  /ledger reset - the window back to the middle, normal size and scale"] =
     "/ledger clear - alle offenen Würfe verwerfen;  /ledger reset - Fenster mittig, in normaler Größe und Skalierung"
 
@@ -328,7 +338,40 @@ L["The whole raid by group: click a name to pick them"] = "Der ganze Raid nach G
 L["Click: recipient. Right-click: pass or count the roll differently."] =
     "Klick: Empfänger. Rechtsklick: passen oder den Wurf anders werten."
 L["Click: recipient"] = "Klick: Empfänger"
-L["New raid: empties the award list (export it first)"] = "Neuer Raid: leert die Vergaben (vorher exportieren)"
+L["New raid: starts an empty award list; this raid is kept under HISTORY"] = "Neuer Raid: beginnt leere Vergaben; dieser Raid bleibt unter VERLAUF erhalten"
+L["Back to the current raid's awards"] = "Zurück zu den Vergaben des aktuellen Raids"
+L["CURRENT RAID"] = "AKTUELLER RAID"
+L["RAID %s (%d)"] = "RAID %s (%d)"
+
+-- VERLAUF tab (raid history)
+L["HISTORY"] = "VERLAUF"
+L["KEEP"] = "BEHALTEN"
+L["No finished raids yet. NEW RAID keeps the current raid here."] = "Noch keine beendeten Raids. NEUER RAID legt den aktuellen hier ab."
+L["SELECTED RAID"] = "AUSGEWÄHLTER RAID"
+L["SHOW AWARDS"] = "VERGABEN ZEIGEN"
+L["CONTINUE"] = "FORTSETZEN"
+L["DELETE"] = "LÖSCHEN"
+L["SHARE"] = "TEILEN"
+L["Send this raid's awards to the group: their ledgers and wishlists keep it under their history"] = "Die Vergaben dieses Raids an die Gruppe senden: deren Bücher und Wunschlisten behalten ihn im Verlauf"
+L["not in a group: nothing to share."] = "nicht in einer Gruppe: nichts zu teilen."
+L["sharing the raid of %s: %d awards, about %d seconds."] = "teile den Raid vom %s: %d Vergaben, etwa %d Sekunden."
+L["%s shared the raid of %s; it is kept under HISTORY."] = "%s hat den Raid vom %s geteilt; er bleibt unter VERLAUF erhalten."
+L["FINISHED RAIDS (%d)"] = "BEENDETE RAIDS (%d)"
+L["FINISHED RAIDS (%d, SCROLL)"] = "BEENDETE RAIDS (%d, SCROLLEN)"
+L["%d awards"] = "%d Vergaben"
+L["1 award"] = "1 Vergabe"
+L["Select a raid on the left"] = "Links einen Raid auswählen"
+L["Show its awards and export, continue it, or delete it."] = "Vergaben und Export zeigen, fortsetzen oder löschen."
+L["recorded by %s  |  %d awards  |  raid ID %s"] = "erfasst von %s  |  %d Vergaben  |  Raid-ID %s"
+L["TALLY OF THIS RAID (%d)"] = "ZÄHLUNG DIESES RAIDS (%d)"
+L["MS %d  OS %d"] = "MS %d  OS %d"
+L["tokens MS %d  OS %d"] = "Tokens MS %d  OS %d"
+L["Keep at least 1 raid."] = "Mindestens 1 Raid behalten."
+L["Finished raids: their awards, tallies and exports; continue or delete one"] = "Beendete Raids: Vergaben, Zählung und Export; fortsetzen oder löschen"
+L["How many finished raids are kept; the oldest go first. Press Enter to save."] = "Wie viele beendete Raids erhalten bleiben; die ältesten gehen zuerst. Mit Enter speichern."
+L["Open this raid's awards in AWARDS: correct them there or build its export"] = "Die Vergaben dieses Raids unter VERGABEN öffnen: dort korrigieren oder exportieren"
+L["Continue this raid (e.g. on a second evening): it becomes the current raid, the current one is kept here"] = "Diesen Raid fortsetzen (z. B. am zweiten Abend): er wird der aktuelle, der aktuelle bleibt hier"
+L["Delete this raid from your ledger only; other players keep theirs"] = "Diesen Raid nur aus deinem Buch löschen; die anderen behalten ihn"
 L["The raid's ID on the website (in its address)"] = "Die Raid-ID auf der Webseite (steht in der Adresse)"
 L["Back to the loot"] = "Zurück zur Beute"
 L["Ctrl+C copies the export; paste it into the website's loot import"] =

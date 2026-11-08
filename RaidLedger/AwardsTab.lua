@@ -39,6 +39,11 @@ exportButton:SetPoint("TOPRIGHT", list, "TOPRIGHT", -8, -6)
 local newRaidButton = ns.flatButton(list, L["NEW RAID"], 86)
 newRaidButton:SetHeight(18)
 newRaidButton:SetPoint("RIGHT", exportButton, "LEFT", -6, 0)
+-- While a saved raid is shown (HISTORY, FR-RL-024), this button leads back.
+local currentButton = ns.flatButton(list, L["CURRENT RAID"], 104, "RaidLedgerShowCurrent")
+currentButton:SetHeight(18)
+currentButton:SetPoint("RIGHT", exportButton, "LEFT", -6, 0)
+currentButton:Hide()
 local emptyText = ns.label(list, "GameFontNormalSmall", 11, {0.42, 0.61, 0.70})
 emptyText:SetPoint("CENTER", list, "CENTER", 0, 10)
 emptyText:SetText(L["No awards recorded in this ledger."])
@@ -190,8 +195,9 @@ end)
 
 local function drawExport(focus)
     if not exportView:IsShown() then return end
-    if not raidBox:HasFocus() then raidBox:SetText(ns.raidID() and tostring(ns.raidID()) or "") end
-    exportText.generated = core.export() or ""
+    local raid = core.shownRaid()
+    if not raidBox:HasFocus() then raidBox:SetText(raid.raidID and tostring(raid.raidID) or "") end
+    exportText.generated = core.export(raid) or ""
     exportText:SetText(exportText.generated)
     if exportText.generated == "" then
         ui.status(L["Enter the website's raid ID to build the export."])
@@ -209,7 +215,7 @@ end
 -- the loot tab (one place for each item, raid of 2026-10-26).
 local function awards()
     local list = {}
-    for _, record in ipairs(core.history()) do
+    for _, record in ipairs(core.shownRaid().history) do
         if not core.isOpenAward(record) then table.insert(list, record) end
     end
     return list
@@ -217,7 +223,7 @@ end
 
 local function selectedRecord()
     local record = core.editing()
-    if record and core.findRecord(record.id) == record and not core.isOpenAward(record) then return record end
+    if record and core.findRecord(record.id, core.shownRaid()) == record and not core.isOpenAward(record) then return record end
     core.edit(nil)
 end
 
@@ -225,7 +231,12 @@ local function drawList()
     local history = awards()
     local total = table.getn(history)
     awardOffset = math.max(0, math.min(awardOffset, total - table.getn(awardRows)))
-    list.heading:SetText(total > table.getn(awardRows) and string.format(L["AWARDS (%d, SCROLL)"], total) or string.format(L["AWARDS (%d)"], total))
+    local heading = total > table.getn(awardRows) and string.format(L["AWARDS (%d, SCROLL)"], total) or string.format(L["AWARDS (%d)"], total)
+    local raid = core.shownRaid()
+    local past = raid ~= core.current()
+    if past then heading = string.format(L["RAID %s (%d)"], core.raidLabel(raid, true), total) end
+    list.heading:SetText(heading)
+    if past then newRaidButton:Hide() currentButton:Show() else currentButton:Hide() newRaidButton:Show() end
     local selected = selectedRecord()
     for i, row in ipairs(awardRows) do
         local record = history[i + awardOffset]
@@ -328,7 +339,8 @@ local function drawDetail()
     end
     changeButton:SetText(deleted and L["RESTORE + SET"] or L["CHANGE RECIPIENT"])
     ns.setEnabled(changeButton, mayEdit)
-    ns.setEnabled(parkButton, mayEdit and not deleted)
+    -- Loot of a saved raid cannot go back to this raid's BEUTE.
+    ns.setEnabled(parkButton, mayEdit and not deleted and core.shownRaid() == core.current())
     ns.setEnabled(removeButton, mayEdit and not deleted)
     drawLog(record)
 end
@@ -353,13 +365,21 @@ local function showView(view)
     end
 end
 
-local tab = ns.addTab("awards", function() return string.format(L["AWARDS (%d)"], table.getn(awards())) end, panel, refresh,
+local function currentAwards()
+    local n = 0
+    for _, record in ipairs(core.history()) do
+        if not core.isOpenAward(record) then n = n + 1 end
+    end
+    return n
+end
+local tab = ns.addTab("awards", function() return string.format(L["AWARDS (%d)"], currentAwards()) end, panel, refresh,
     "RaidLedgerTabButtonAwards")
 tab.view = showView
 ns.tip(tab.button, L["Every award of this raid: change recipient or tally, remove, export for the website"])
 
 -- ns.showAward opens the awards tab on one award (from the tally tab).
 function ns.showAward(record)
+    core.showRaid(nil)
     core.edit(record)
     recipientBox:SetText(record and record.recipient or "")
     logOffset = 0
@@ -451,18 +471,23 @@ StaticPopupDialogs["RAIDLEDGER_REMOVE_AWARD"] = {
     text = L["Remove award %s? The export keeps it as removed; CHANGE RECIPIENT restores it."],
     button1 = YES,
     button2 = NO,
-    OnAccept = function(_, record) core.deleteRecord(record.id) end,
+    OnAccept = function(_, record) core.deleteRecord(record.id, core.shownRaid()) end,
     timeout = 0,
     whileDead = 1,
     hideOnEscape = 1,
 }
 newRaidButton:SetScript("OnClick", function() StaticPopup_Show("RAIDLEDGER_NEW_RAID") end)
+currentButton:SetScript("OnClick", function()
+    core.showRaid(nil)
+    ui.show("awards")
+end)
 exportButton:SetScript("OnClick", function() ui.show(exportView:IsShown() and "awards" or "export") end)
 backButton:SetScript("OnClick", function() ui.show("awards") end)
 raidBox:SetScript("OnTextChanged", function(self)
     local value = tonumber(self:GetText())
-    if value ~= ns.raidID() then
-        ns.setRaidID(value)
+    local raid = core.shownRaid()
+    if value ~= raid.raidID then
+        if raid == core.current() then ns.setRaidID(value) else raid.raidID = value end
         drawExport(false)
     end
 end)
@@ -472,7 +497,8 @@ recipientBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
 recipientBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
 ns.tip(exportButton, L["The website export of this raid's awards (RS2 LOOT)"])
-ns.tip(newRaidButton, L["New raid: empties the award list (export it first)"])
+ns.tip(newRaidButton, L["New raid: starts an empty award list; this raid is kept under HISTORY"])
+ns.tip(currentButton, L["Back to the current raid's awards"])
 ns.tip(specButtons[1], L["The award counts in the winner's main-spec tally"])
 ns.tip(specButtons[2], L["The award counts in the winner's off-spec tally"])
 ns.tip(specButtons[3], L["The award counts in no tally"])
@@ -493,6 +519,7 @@ events:SetScript("OnEvent", function()
     if ForgeTestBridge and ForgeTestBridge.RegisterFrame then
         ForgeTestBridge:RegisterFrame("RaidLedgerHistory1", awardRows[1])
         ForgeTestBridge:RegisterFrame("RaidLedgerExportButton", exportButton)
+        ForgeTestBridge:RegisterFrame("RaidLedgerShowCurrent", currentButton)
         ForgeTestBridge:RegisterFrame("RaidLedgerExportText", exportText)
         ForgeTestBridge:RegisterFrame("RaidLedgerAwardRecipient", recipientBox)
         ForgeTestBridge:RegisterFrame("RaidLedgerChangeRecipient", changeButton)
