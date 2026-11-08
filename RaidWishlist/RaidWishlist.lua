@@ -10,7 +10,10 @@ local Wishlist = CreateFrame("Frame", "RaidWishlistFrame", UIParent)
 local PREFIX = "FLLedger"
 local AUTO_DELAY = 1        -- seconds before an automatic roll
 local SPEC_LABELS = { ms = "MS", os = "OS" }
-local DEFAULT_REMINDER_KEYWORDS = "roll,würfel"
+-- No keyword by default (user decision 2026-11-06): any announcement with a
+-- wishlisted item link counts. The old default is dropped from saved settings.
+local DEFAULT_REMINDER_KEYWORDS = ""
+local OLD_DEFAULT_KEYWORDS = "roll,würfel"
 -- Disenchanted or banked items have a holder but count for nobody.
 local NO_TALLY = { disenchanted = true, bank = true }
 local TOKEN_NAMES = { "Weiheabzeichen" }
@@ -18,6 +21,8 @@ local TOKEN_NAMES = { "Weiheabzeichen" }
 local prompt                -- the open roll prompt { key, entry, endsAt }
 local pendingRoll           -- an automatic roll waiting for its delay
 local rolled = {}           -- rollKey:round -> true, so every roll happens once
+local chatLines = 0         -- counts chat reminders, one roll key per line
+local manualSync = { offered = {} }   -- /wish sync: when, and the older raids already offered
 local syncAt
 local shareAt               -- when to send this wishlist to the group
 local helloAt               -- when to tell the ledgers this addon's version (HW)
@@ -88,8 +93,14 @@ local function ensureDatabase()
     db.chars = db.chars or {}
     db.raid = db.raid or { awards = {} }
     db.raid.awards = db.raid.awards or {}
+    db.pastRaids = db.pastRaids or {}   -- earlier raids, newest first (FR-RW-010)
     local me = playerName()
     db.chars[me] = db.chars[me] or { items = {} }
+    -- Once per character: settings saved before 2.4.0 stored the old default.
+    if not db.chars[me].keywordsChecked then
+        if db.chars[me].reminderKeywords == OLD_DEFAULT_KEYWORDS then db.chars[me].reminderKeywords = nil end
+        db.chars[me].keywordsChecked = true
+    end
     return db, db.chars[me]
 end
 
@@ -98,12 +109,15 @@ local function reminderKeywords(char)
 end
 
 -- Keywords count only outside item links: "[Trollbane]" is no "roll".
+-- Without keywords every message matches.
 local function matchingReminderKeyword(message, char)
     local text = lower((string.gsub(message, "|H.-|h.-|h", "")))
+    local any = false
     for keyword in string.gmatch(reminderKeywords(char), "[^,]+") do
-        if keyword ~= "" and string.find(text, lower(keyword), 1, true) then return true end
+        any = true
+        if string.find(text, lower(keyword), 1, true) then return true end
     end
-    return false
+    return not any
 end
 
 local MAX_ENHANCED = 50     -- X = min(EP, 50), the website's rule
@@ -203,10 +217,10 @@ local function isOpenAward(award)
     return award.state == "parked" or (award.state == "held" and not award.spec and not award.winner)
 end
 
-local function sortedAwards()
+local function sortedAwards(raid)
     local db = ensureDatabase()
     local list = {}
-    for _, award in pairs(db.raid.awards) do table.insert(list, award) end
+    for _, award in pairs((raid or db.raid).awards) do table.insert(list, award) end
     table.sort(list, function(a, b)
         if (a.at or 0) ~= (b.at or 0) then return (a.at or 0) > (b.at or 0) end
         return a.key < b.key
@@ -250,17 +264,97 @@ local function followSession(session)
     if session == "" then return false end
     if session ~= db.raid.session then
         if db.raid.session and sessionTime(session) < sessionTime(db.raid.session) then return false end
+        manualSync.archive()
         db.raid = { session = session, awards = {}, corpse = {} }
     end
     db.raid.corpse = db.raid.corpse or {}
     return true
 end
 
+-- Past raids (FR-RW-010): the raids this wishlist followed before, kept with
+-- their awards, at most as many as the player chooses (SETTINGS).
+manualSync.DEFAULT_KEEP = 20
+function manualSync.keep() return ensureDatabase().keepRaids or manualSync.DEFAULT_KEEP end
+
+function manualSync.findPast(session)
+    for index, raid in ipairs(ensureDatabase().pastRaids) do
+        if raid.session == session then return raid, index end
+    end
+end
+
+function manualSync.trim()
+    local past = ensureDatabase().pastRaids
+    while table.getn(past) > manualSync.keep() do table.remove(past) end
+end
+
+-- manualSync.archive keeps the followed raid, when it has awards, as a past raid.
+function manualSync.archive()
+    local db = ensureDatabase()
+    if not db.raid.session or not next(db.raid.awards) then return end
+    local _, index = manualSync.findPast(db.raid.session)
+    if index then table.remove(db.pastRaids, index) end
+    table.insert(db.pastRaids, 1, { session = db.raid.session, awards = db.raid.awards })
+    manualSync.trim()
+end
+
+-- manualSync.addShared keeps a raid another ledger shared from its history as
+-- a past raid, in date order (FR-RW-011), and says so once.
+manualSync.told = {}
+function manualSync.addShared(session, sender)
+    local past = ensureDatabase().pastRaids
+    local raid = { session = session, awards = {} }
+    local position = table.getn(past) + 1
+    for i, other in ipairs(past) do
+        if sessionTime(other.session) < sessionTime(session) then position = i break end
+    end
+    table.insert(past, position, raid)
+    manualSync.trim()
+    if not manualSync.findPast(session) then return nil end   -- older than every raid kept
+    if not manualSync.told[session] then
+        manualSync.told[session] = true
+        say(string.format(L["%s shared the raid of %s; < on THIS RAID shows it."], sender or "?",
+            date("%d.%m.", sessionTime(session))))
+    end
+    return raid
+end
+
+-- manualSync.shownRaid is the raid THIS RAID shows: the followed one, or the
+-- past raid number `manualSync.shown` (only for looking back).
+function manualSync.shownRaid()
+    local db = ensureDatabase()
+    local index = manualSync.shown or 0
+    if index > table.getn(db.pastRaids) then index = 0 end
+    manualSync.shown = index
+    return index > 0 and db.pastRaids[index] or db.raid
+end
+
+-- manualSync.offerReopened answers a ledger that continues an older raid
+-- ("R;session;origin"): say so and ask once whether to follow it.
+function manualSync.offerReopened(f)
+    local session = f[2] or ""
+    if session == "" or session == ensureDatabase().raid.session or manualSync.offered[session] then return end
+    manualSync.offered[session] = true
+    say(string.format(L["%s continues an older raid."], f[3] or "?"))
+    StaticPopup_Show("RAIDWISHLIST_FOLLOW_RAID", f[3] or "?", nil, { session = session })
+end
+
+-- manualSync.offerOlderRaid answers a /wish sync that brought an older raid (FR-RW-009):
+-- say so, and ask once per sync and raid whether to show that raid instead.
+-- Older raids that arrive without a sync of the player's own stay silent.
+function manualSync.offerOlderRaid(session, origin)
+    if session == "" or not manualSync.at or GetTime() - manualSync.at > 60 then return end
+    if manualSync.offered[session] then return end
+    manualSync.offered[session] = true
+    say(string.format(L["%s's ledger holds an older raid than the one shown."], origin))
+    StaticPopup_Show("RAIDWISHLIST_FOLLOW_RAID", origin, nil, { session = session })
+end
+
 -- applyOpenItems stores a ledger's list of loot still waiting in its roll list:
 -- "itemID:status:source:winner,...", status o/r/w, source c (corpse) or
 -- a<award id> (an open award being rolled later).
 local function applyOpenItems(f)
-    if f[3] == "" or not followSession(f[2]) then return false end
+    if f[3] == "" then return false end
+    if not followSession(f[2]) then manualSync.offerOlderRaid(f[2] or "", f[3]) return false end
     local list = {}
     for item in string.gmatch(f[4] or "", "[^,]+") do
         local itemID, itemStatus, source, winner = string.match(item, "^(%d+):(%a):(%w+):(.*)$")
@@ -273,13 +367,27 @@ local function applyOpenItems(f)
     return true
 end
 
-local function applyAward(f)
+local function applyAward(f, sender)
     local id, rev = tonumber(f[4]), tonumber(f[5])
     if not id or not rev or f[3] == "" or table.getn(f) < 19 then return false end
-    if not followSession(f[2]) then return false end
     local db = ensureDatabase()
+    local raid
+    if f[20] == "1" or f[20] == "2" then
+        -- A finished raid's award (a correction, or shared from VERLAUF,
+        -- FR-RW-011) never changes the raid this wishlist follows.
+        if f[2] == db.raid.session then raid = db.raid
+        else raid = manualSync.findPast(f[2]) or (f[20] == "2" and manualSync.addShared(f[2], sender)) end
+        if not raid then return false end
+    elseif followSession(f[2]) then
+        raid = db.raid   -- after followSession: a new raid is a new table
+    else
+        manualSync.offerOlderRaid(f[2], f[3])
+        -- A raid kept from before gets its corrections; others are ignored.
+        raid = manualSync.findPast(f[2])
+        if not raid then return false end
+    end
     local key = lower(f[3]) .. ":" .. id
-    local award = db.raid.awards[key]
+    local award = raid.awards[key]
     if award and award.rev >= rev then return false end
     local itemID = tonumber(f[7])
     award = award or { key = key }
@@ -289,7 +397,8 @@ local function applyAward(f)
     award.spec = (f[12] == "ms" or f[12] == "os") and f[12] or nil
     award.roll, award.winner = tonumber(f[13]), f[16] ~= "" and f[16] or nil
     award.token = f[18] == "1" or isToken(award.item) or nil
-    db.raid.awards[key] = award
+    raid.awards[key] = award
+    if raid ~= db.raid then return true end
     -- An enhanced win of mine costs X until the next export brings the new balance.
     local _, char = ensureDatabase()
     local low, high = tonumber(f[14]), tonumber(f[15])
@@ -564,6 +673,7 @@ local function addList(id, name, caption, columns, emptyText)
     local list = { id = id, pane = pane, rows = {}, pool = {}, offset = 0, count = 0, caption = caption }
     list.heading = label(pane, "GameFontNormal", 11, {1.00, 0.82, 0.32})
     list.heading:SetPoint("TOPLEFT", pane, "TOPLEFT", 12, -10)
+    pane.heading = list.heading
     list.empty = label(pane, "GameFontNormalSmall", 11, "dim")
     list.empty:SetPoint("CENTER", pane, "CENTER", 0, -8)
     list.empty:SetJustifyH("CENTER")
@@ -632,6 +742,11 @@ end
 function lists.show(id)
     local _, char = ensureDatabase()
     currentList = lists[id] or lists.wish
+    -- Leaving THIS RAID goes back to the followed raid (FR-RW-010).
+    if currentList.id ~= "raid" and (manualSync.shown or 0) > 0 then
+        manualSync.shown = 0
+        if lists.redraw then lists.redraw() end
+    end
     char.tab = currentList.id
     for _, list in ipairs(listOrder) do
         if list == currentList then list.pane:Show() else list.pane:Hide() end
@@ -654,8 +769,13 @@ local raidList = addList("raid", "RaidWishlistRaid", counted(L["THIS RAID"]),
     L["Nothing handed out yet.\nAwards appear here when the raid lead uses RaidLedger."])
 local wishRows, openRows, raidRows = wishList.rows, openList.rows, raidList.rows
 
-local tallyText = label(raidList.pane, "GameFontNormalSmall", 9, "faint")
-tallyText:SetPoint("TOPRIGHT", raidList.pane, "TOPRIGHT", -12, -11)
+-- < and > step through the raids kept from before (FR-RW-010).
+raidList.newer = flatButton(raidList.pane, "RaidWishlistRaidNewer", ">", 22, 18)
+raidList.newer:SetPoint("TOPRIGHT", raidList.pane, "TOPRIGHT", -10, -6)
+raidList.older = flatButton(raidList.pane, "RaidWishlistRaidOlder", "<", 22, 18)
+raidList.older:SetPoint("RIGHT", raidList.newer, "LEFT", -4, 0)
+local tallyText = label(raidList.pane, "GameFontNormalSmall", 9, "faint", "RaidWishlistRaidTally")
+tallyText:SetPoint("RIGHT", raidList.older, "LEFT", -10, 0)
 tallyText:SetJustifyH("RIGHT")
 
 local status = label(Wishlist, "GameFontNormalSmall", 10, "faint")
@@ -827,7 +947,7 @@ reminderHint:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 12, -146)
 reminderHint:SetPoint("RIGHT", settingsPanel, "RIGHT", -12, 0)
 reminderHint:SetWordWrap(true)
 reminderHint:SetJustifyH("LEFT")
-reminderHint:SetText(L["A reminder needs a wishlisted item link and a keyword."])
+reminderHint:SetText(L["A reminder needs a wishlisted item link. Keywords are optional."])
 -- Off by default (user decision 2026-10-26): chat only opens prompts once
 -- the player switches the reminder on.
 local reminderOn = flatButton(settingsPanel, "RaidWishlistReminderOn", "", 180, 24)
@@ -1041,12 +1161,25 @@ end
 
 local function updateRaid()
     local awards = {}
-    for _, award in ipairs(sortedAwards()) do
+    local shown = manualSync.shownRaid()
+    for _, award in ipairs(sortedAwards(shown)) do
         if not isOpenAward(award) then table.insert(awards, award) end   -- open ones are in their own tab
     end
     local list = raidList
     local count = table.getn(awards)
-    list.heading:SetText(count > 0 and string.format(L["THIS RAID (%d)"], count) or L["THIS RAID"])
+    local past = manualSync.shown > 0
+    if past then
+        list.heading:SetText(string.format(L["RAID OF %s (%d)"], date("%d.%m.", sessionTime(shown.session)), count))
+    else
+        list.heading:SetText(count > 0 and string.format(L["THIS RAID (%d)"], count) or L["THIS RAID"])
+    end
+    local older = manualSync.shown < table.getn(ensureDatabase().pastRaids)
+    if older then list.older:Enable() else list.older:Disable() end
+    list.older:SetAlpha(older and 1 or 0.4)
+    if past then list.newer:Enable() else list.newer:Disable() end
+    list.newer:SetAlpha(past and 1 or 0.4)
+    -- The tally belongs to the followed raid only.
+    if past then tallyText:Hide() else tallyText:Show() end
     place(list, count)
     local items, tokens = myTally()
     tallyText:SetText(string.format(L["YOU: ITEMS %d MS / %d OS  |  TOKENS %d MS / %d OS"],
@@ -1116,6 +1249,18 @@ local function refresh()
     if currentList then drawTabs() else lists.show(select(2, ensureDatabase()).tab) end
 end
 windowSize.redraw = refresh
+lists.redraw = refresh
+
+raidList.older:SetScript("OnClick", function()
+    manualSync.shown = math.min((manualSync.shown or 0) + 1, table.getn(ensureDatabase().pastRaids))
+    raidList.offset = 0
+    refresh()
+end)
+raidList.newer:SetScript("OnClick", function()
+    manualSync.shown = math.max((manualSync.shown or 0) - 1, 0)
+    raidList.offset = 0
+    refresh()
+end)
 
 local function closeOverlay(panel)
     panel:Hide()
@@ -1286,6 +1431,35 @@ end
 -- that stores the points alone.
 local settings = { draft = {} }
 
+-- How many past raids THIS RAID keeps (FR-RW-010), beside the points.
+do
+    local box = CreateFrame("EditBox", "RaidWishlistKeepRaids", settingsPanel, "InputBoxTemplate")
+    box:SetAutoFocus(false)
+    box:SetNumeric(true)
+    box:SetMaxLetters(4)
+    box:SetWidth(48)
+    box:SetHeight(22)
+    box:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -64)
+    local heading = label(settingsPanel, "GameFontNormal", 12, {1.00, 0.82, 0.32})
+    heading:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -42)
+    heading:SetJustifyH("RIGHT")
+    heading:SetText(L["PAST RAIDS"])
+    local caption = label(settingsPanel, "GameFontNormalSmall", 10, "soft")
+    caption:SetPoint("RIGHT", box, "LEFT", -10, 0)
+    caption:SetText(L["Keep"])
+    settings.keepBox = box
+end
+
+-- settings.typedKeep reads the past-raids field: a whole number of at least 1.
+function settings.typedKeep()
+    local keep = tonumber(trim(settings.keepBox:GetText()))
+    if not keep or keep < 1 or keep ~= math.floor(keep) then
+        settingsStatus:SetText(L["Keep at least 1 past raid."])
+        return nil
+    end
+    return keep
+end
+
 -- typedPoints reads the points field: a whole number from 0 to 999999, or nil
 -- after naming the problem.
 function settings.typedPoints()
@@ -1355,6 +1529,7 @@ function settings.show()
     settings.draft.reminderOn = char.reminderOn
     editorPoints:SetText(settings.draft.points)
     reminderKeywordsBox:SetText(reminderKeywords(char))
+    settings.keepBox:SetText(tostring(manualSync.keep()))
     settingsStatus:SetText("")
     settings.updateReminderButton()
     Wishlist:Show()
@@ -1368,12 +1543,18 @@ end
 function settings.close()
     editorPoints:ClearFocus()
     reminderKeywordsBox:ClearFocus()
+    settings.keepBox:ClearFocus()
     closeOverlay(settingsPanel)
 end
 
 function settings.save()
     local points = settings.typedPoints()
     if not points then return end
+    local keep = settings.typedKeep()
+    if not keep then return end
+    local db = ensureDatabase()
+    db.keepRaids = keep ~= manualSync.DEFAULT_KEEP and keep or nil
+    manualSync.trim()
     local words = {}
     -- Stored as typed and lowered only to compare: lowering can mangle
     -- "ü" (playbook), so a stored "würfel" would never match again.
@@ -1381,16 +1562,12 @@ function settings.save()
     for word in string.gmatch(value, "[^,%s]+") do
         if string.len(word) <= 32 then table.insert(words, word) end
     end
-    if table.getn(words) == 0 then
-        settingsStatus:SetText(L["Enter at least one reminder keyword."])
-        return
-    end
     local _, char = ensureDatabase()
     -- Unchanged points keep the wins counted since the last balance.
     if tostring(points) ~= settings.draft.points then settings.setBalance(char, points) end
     char.reminderAll = settings.draft.reminderAll
     char.reminderOn = settings.draft.reminderOn
-    char.reminderKeywords = table.concat(words, ",")
+    char.reminderKeywords = table.getn(words) > 0 and table.concat(words, ",") or nil
     settings.close()
     refresh()
     status:SetText(L["Settings saved."])
@@ -1416,6 +1593,8 @@ local function showPrompt(entry, key, seconds)
     prompt = { entry = entry, key = key, endsAt = GetTime() + seconds }
     promptItem:SetText(itemLink(entry.itemID))
     local note = entry.note ~= "" and ("  -  " .. entry.note) or ""
+    -- FR-RW-007: an item already won is rolled again, but the player is told.
+    if entry.received then note = "  -  " .. L["already received"] .. note end
     promptNote:SetText(string.format(L["Priority %d, %s%s"], entry.priority, rangeLabel(entry), note))
     rollButton:SetText(string.format(L["ROLL %s"], rangeLabel(entry)))
     Prompt:Show()
@@ -1441,11 +1620,13 @@ local function onRollStart(f)
     if not itemID or not seconds or f[4] == "" then return end
     -- The first roll of a new raid can be its first message: switch to that
     -- raid before asking what was received (last raid's awards do not count).
+    -- A ledger that still holds an older raid prompts too, but keeps this
+    -- raid's lists (FR-RW-008): several raiders may run RaidLedger.
+    if (f[2] or "") == "" then return end
     local before = ensureDatabase().raid.session
-    if not followSession(f[2] or "") then return end
-    if ensureDatabase().raid.session ~= before then refresh() end
+    if followSession(f[2]) and ensureDatabase().raid.session ~= before then refresh() end
     local entry = findWish(itemID)
-    if not entry or entry.received then return end
+    if not entry then return end
     if round > 1 then
         local tied = false
         for name in string.gmatch(f[8] or "", "[^,]+") do
@@ -1504,6 +1685,23 @@ local function isMasterLooter(name)
     return master and lower(master) == lower(name)
 end
 
+-- settings.mayAnnounceRolls is who counts in "only the master looter" mode: the master
+-- looter, or without master loot (group loot for trash) the raid lead and the
+-- assistants, in a party its leader (user decision 2026-11-06).
+function settings.mayAnnounceRolls(name)
+    if GetLootMethod() == "master" then return isMasterLooter(name) end
+    local key = lower(name)
+    if GetNumRaidMembers() and GetNumRaidMembers() > 0 then
+        for i = 1, GetNumRaidMembers() do
+            local member, rank = GetRaidRosterInfo(i)
+            if member and lower(member) == key then return (rank or 0) > 0 end
+        end
+        return false
+    end
+    local leader = GetPartyLeaderIndex()
+    return leader and leader > 0 and lower(UnitName("party" .. leader) or "") == key or false
+end
+
 -- shareWishlist sends this character's wishlist to the group so the raid
 -- lead's ledger can show who wants an item:
 --   W;<exported at>;<part>;<parts>;<itemID>:<m|o>:<enhanced 0|1>:<rank>,...
@@ -1545,6 +1743,26 @@ local function requestSync()
     return false
 end
 
+StaticPopupDialogs["RAIDWISHLIST_FOLLOW_RAID"] = {
+    text = L["Show the loot of %s's older raid instead of this raid's?"],
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(_, data)
+        if not data or not data.session then return end
+        local db = ensureDatabase()
+        local past, index = manualSync.findPast(data.session)
+        if past then table.remove(db.pastRaids, index) end
+        manualSync.archive()
+        db.raid = { session = data.session, awards = past and past.awards or {}, corpse = {} }
+        manualSync.shown = nil
+        refresh()
+        requestSync()
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
 local function onAddonMessage(prefix, message, channel, sender)
     if prefix ~= PREFIX or type(message) ~= "string" or not sender then return end
     if (channel ~= "RAID" and channel ~= "PARTY") or not inGroup(sender) then return end
@@ -1552,9 +1770,11 @@ local function onAddonMessage(prefix, message, channel, sender)
     if f[1] == "S" then
         onRollStart(f)
     elseif f[1] == "A" then
-        if applyAward(f) then refresh() end
+        if applyAward(f, sender) then refresh() end
     elseif f[1] == "O" then
         if applyOpenItems(f) then refresh() end
+    elseif f[1] == "R" then
+        manualSync.offerReopened(f)
     elseif f[1] == "WQ" then
         shareAt = shareAt or (GetTime() + answerDelay())
     elseif f[1] == "HQ" then
@@ -1564,7 +1784,7 @@ local function onAddonMessage(prefix, message, channel, sender)
 end
 
 -- Chat from another loot addon is untrusted text. It only creates a prompt
--- after both a user-selected keyword and a wishlisted item link match.
+-- for a wishlisted item link, and a keyword when the player set any.
 local function onChatReminder(message, sender)
     if type(message) ~= "string" or not sender or isPlayer(sender) then return end
     -- RaidLedger starts its rolls by addon message; its "[Loot]" lines
@@ -1572,12 +1792,15 @@ local function onChatReminder(message, sender)
     if string.find(message, "^%[Loot%]") then return end
     local _, char = ensureDatabase()
     if not char.reminderOn or not matchingReminderKeyword(message, char) then return end
-    if not char.reminderAll and not isMasterLooter(sender) then return end
+    if not char.reminderAll and not settings.mayAnnounceRolls(sender) then return end
     for id in string.gmatch(message, "|Hitem:(%d+):") do
         local entry = findWish(tonumber(id))
-        if entry and not entry.received then
-            local key = "chat:" .. lower(sender) .. ":" .. id .. ":" .. lower(message)
-            if rolled[key] then return end
+        if entry then
+            -- Every line is a new roll (user decision 2026-11-06): a master
+            -- looter repeats "t [item] 2" for each copy. A repeat while the
+            -- prompt is open replaces it, which restarts its timer.
+            chatLines = chatLines + 1
+            local key = "chat:" .. lower(sender) .. ":" .. id .. ":" .. chatLines
             if not Wishlist:IsShown() then
                 refresh()
                 lists.show("wish")
@@ -1778,6 +2001,7 @@ local function buttonTip(button, text)
     button:SetScript("OnLeave", function() GameTooltip:Hide() end)
 end
 buttonTip(autoButton, L["Auto-roll: roll on wishlisted items by yourself, without the prompt (e.g. while away)."])
+buttonTip(reminderAll, L["Who may announce a roll in chat. Only the master looter: without master loot (for example group loot), the raid lead and the assistants."])
 buttonTip(importOpen, L["Import: paste your wishlist export from the guild website."])
 buttonTip(editOpen, L["Edit: add, change or remove wishlist items."])
 buttonTip(catalogueSearchButton, L["Catalogue search: find WotLK raid loot by English or German name."])
@@ -1912,6 +2136,7 @@ Wishlist:RegisterEvent("PLAYER_LOGIN")
 Wishlist:RegisterEvent("CHAT_MSG_ADDON")
 Wishlist:RegisterEvent("CHAT_MSG_RAID")
 Wishlist:RegisterEvent("CHAT_MSG_RAID_LEADER")
+Wishlist:RegisterEvent("CHAT_MSG_RAID_WARNING")
 Wishlist:RegisterEvent("CHAT_MSG_PARTY")
 Wishlist:RegisterEvent("CHAT_MSG_PARTY_LEADER")
 Wishlist:SetScript("OnEvent", function(self, event, ...)
@@ -1952,6 +2177,7 @@ Wishlist:SetScript("OnEvent", function(self, event, ...)
             ForgeTestBridge:RegisterFrame("RaidWishlistReminderCancel", reminderCancel)
             ForgeTestBridge:RegisterFrame("RaidWishlistPrompt", Prompt)
             ForgeTestBridge:RegisterFrame("RaidWishlistRoll", rollButton)
+            ForgeTestBridge:RegisterFrame("RaidWishlistSkip", skipButton)
             ForgeTestBridge:RegisterFrame("RaidWishlistWish1", wishRows[1])
             ForgeTestBridge:RegisterFrame("RaidWishlistRaid1", raidRows[1])
             ForgeTestBridge:RegisterFrame("RaidWishlistOpen1", openRows[1])
@@ -1966,7 +2192,8 @@ Wishlist:SetScript("OnEvent", function(self, event, ...)
         end
     elseif event == "CHAT_MSG_ADDON" then
         onAddonMessage(...)
-    elseif event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" then
+    elseif event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" or event == "CHAT_MSG_RAID_WARNING"
+        or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" then
         onChatReminder(...)
     end
 end)
@@ -2075,6 +2302,7 @@ SlashCmdList["RAIDWISHLIST"] = function(message)
         windowSize.reset()
         Wishlist:Show()
     elseif command == "sync" then
+        manualSync.at, manualSync.offered = GetTime(), {}
         if requestSync() then say(L["asked the raid lead's ledger for this raid's awards."]) else say(L["not in a group."]) end
     else
         for _, line in ipairs(HELP) do say(line) end

@@ -33,7 +33,7 @@ entries, and the window remembers the last tab:
 | --- | --- |
 | **WUNSCHLISTE** | Your wishlist in rank order: item, note, roll range (or `ERHALTEN`) |
 | **OFFEN** | Loot still waiting to be rolled, where it is and its status |
-| **DIESER RAID** | Who got what this raid (item, recipient, spec) and your items so far |
+| **DIESER RAID** | Who got what this raid (item, recipient, spec) and your items so far; **<** / **>** show earlier raids |
 
 A roll on a wishlisted item opens the window on **OFFEN**. Every header button
 and tab has a tooltip.
@@ -118,18 +118,26 @@ spec and EP) or **SKIP**. It closes when the roll ends.
 second after the roll starts, for example while you are away from the keyboard.
 
 Either way the addon rolls at most once per roll (the ledger only counts your
-first roll), joins a tie-break only if you are one of the tied players, and
-does not roll on items you already received this raid.
+first roll) and joins a tie-break only if you are one of the tied players.
+It answers a roll started by any raider's RaidLedger, also one that still
+holds an older raid; only the newest raid fills **THIS RAID** and **OPEN**. It
+also rolls on items you already received this raid (some items are wanted
+twice); the prompt then says **already received**.
 
 ### Chat announcements without RaidLedger
 
 Click **SETTINGS** to configure announcements from another loot addon or from
 chat. The reminder is off until you switch it on there (**CHAT REMINDER**) or
-with `/wish remind on`. Once on, RaidWishlist reacts only when the master looter posts both an
-item from your wishlist and one of the keywords `roll` or `würfel` in party or
-raid chat. Both the keyword list and the restriction to the master looter are
-configurable. Keywords count only outside item links, so a message with just an
-item link (even `[Trollbane]`) never creates a roll prompt. RaidLedger's own
+with `/wish remind on`. Once on, RaidWishlist reacts when the master looter
+posts an item from your wishlist in party chat, raid chat or a raid warning. No
+keyword is needed by default; enter keywords (for example `roll, würfel`) to
+react only to lines that contain one of them, and clear the field to need none
+again. Every such line is a new roll: when the master looter posts the same
+line again (for example `t [item] 2` for each copy), the prompt opens again,
+or auto-roll rolls again. Without master loot (for example group loot for trash), "only the master
+looter" means the raid lead and the assistants (in a party, its leader). This
+restriction is configurable too. Keywords count
+only outside item links, so `[Trollbane]` never counts as `roll`. RaidLedger's own
 `[Loot]` announcements are ignored: RaidLedger starts its rolls directly.
 
 ## Open items
@@ -151,7 +159,21 @@ and off spec each), which decides close rolls. An item the master looter holds f
 counts as yours, and its wishlist entry shows **RECEIVED**.
 
 After a login or `/reload` the addon asks the group for this raid's awards
-(`/wish sync` asks again). A newer raid replaces the list automatically.
+(`/wish sync` asks again). A newer raid replaces the list automatically. When
+`/wish sync` brings an older raid (for example last Monday's, held by another
+raider's ledger), chat says so and a question offers to show that raid's loot
+instead; a newer raid replaces it again later.
+
+**Past raids** (2.5.0): a raid that a newer one replaces is kept with its
+awards. **<** and **>** at the top of DIESER RAID step back to earlier raids
+(the heading names the raid's date) and forward again; leaving the tab goes
+back to this raid. Only this raid decides **RECEIVED**, the tally in the
+header (hidden while an earlier raid is shown) and roll prompts. When the raid
+lead's RaidLedger continues an older raid, a question asks whether to follow
+it. A raid that a RaidLedger shares from its VERLAUF is kept as a past raid
+too, and chat says who shared it. **SETTINGS** > **PAST RAIDS** > **Keep** sets
+how many raids stay (20 by default, at least 1).
+
 Disenchanted and guild-bank items show **DE** and **BANK**; they count for
 nobody.
 
